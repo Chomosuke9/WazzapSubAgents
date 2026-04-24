@@ -94,7 +94,7 @@ pycparser
 py7zr
 pyee
 Pygments
-PyGObject
+# PyGObject requires system cairo/gobject libs; install manually if needed
 PyJWT
 pymdown-extensions
 pyoo

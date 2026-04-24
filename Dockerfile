@@ -37,6 +37,9 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
+# PyGObject requires system cairo/gobject libs (installed above)
+RUN pip install --no-cache-dir --user PyGObject
+
 # Stage 2: Runtime (copy pre-installed packages only)
 FROM python:3.11-slim
 
