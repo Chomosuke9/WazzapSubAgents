@@ -3,8 +3,35 @@ FROM python:3.11-slim as builder
 
 WORKDIR /app
 
-# Install system deps
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# Install system deps required for building & runtime libraries
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    gcc \
+    g++ \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libglib2.0-dev \
+    libgirepository1.0-dev \
+    libcairo2-dev \
+    pkg-config \
+    python3-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    libffi-dev \
+    libssl-dev \
+    libblas-dev \
+    liblapack-dev \
+    libportaudio2 \
+    poppler-utils \
+    tesseract-ocr \
+    ghostscript \
+    libmagic1 \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies (cached layer)
 COPY requirements.txt .
@@ -15,8 +42,30 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy system curl from builder if needed (optional)
-COPY --from=builder /usr/bin/curl /usr/bin/curl
+# Install runtime system deps (same set minus build tools)
+RUN apt-get update && apt-get install -y \
+    curl \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libglib2.0-dev \
+    libgirepository1.0-dev \
+    libcairo2-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    libffi-dev \
+    libssl-dev \
+    libblas-dev \
+    liblapack-dev \
+    libportaudio2 \
+    poppler-utils \
+    tesseract-ocr \
+    ghostscript \
+    libmagic1 \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-installed Python packages from builder
 COPY --from=builder /root/.local /root/.local
