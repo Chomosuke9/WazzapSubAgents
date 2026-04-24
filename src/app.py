@@ -5,6 +5,7 @@ from typing import Any, Dict
 from flask import Flask, request, jsonify
 
 from src.agent import ExecutorAgent
+from src.config import config
 from src.container_client import ContainerClient
 from src.docker_manager import DockerManager
 from src.logger import get_logger
@@ -17,7 +18,7 @@ def create_app(docker_mgr: DockerManager) -> Flask:
     app = Flask(__name__)
     container_url = docker_mgr.get_container_url()
     container_client = ContainerClient(container_url)
-    session_manager = SessionManager()
+    session_manager = SessionManager(idle_timeout=config["session_idle_timeout"])
 
     @app.get("/health")
     def health():

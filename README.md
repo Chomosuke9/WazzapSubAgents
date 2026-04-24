@@ -4,10 +4,10 @@ Standalone helper service that manages Docker containers, agent execution, and e
 
 ## Quick Start
 
-1. Copy environment template and fill in your Anthropic API key:
+1. Copy environment template and fill in your LLM API key:
    ```bash
    cp .env.example .env
-   # Edit .env and set ANTHROPIC_API_KEY
+   # Edit .env and set LLM_API_KEY
    ```
 
 2. Install dependencies:
@@ -81,11 +81,11 @@ bash scripts/test_integration.sh
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| ANTHROPIC_API_KEY | Yes | — | Claude API key |
+| LLM_API_KEY | Yes | — | LLM API key |
 | AGENT_MODEL | Yes | — | Model name (e.g. claude-3-5-sonnet) |
 | AGENT_TEMPERATURE | No | 0.7 | Sampling temperature |
 | AGENT_MAX_TOKENS | No | 4096 | Max tokens per response |
 | FLASK_PORT | No | 5000 | Main service port |
 | CONTAINER_EXECUTOR_URL | No | http://localhost:5001 | In-container executor URL |
-| CONTAINER_IDLE_TIMEOUT | No | 600 | Session idle timeout (seconds) |
+| SESSION_IDLE_TIMEOUT | No | 600 | Session idle timeout (seconds) |
 | LOG_LEVEL | No | INFO | Logging level |

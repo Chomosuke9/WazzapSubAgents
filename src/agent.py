@@ -22,7 +22,7 @@ class ExecutorAgent:
             model=config["agent_model"],
             temperature=config["agent_temperature"],
             max_tokens=config["agent_max_tokens"],
-            anthropic_api_key=config["anthropic_api_key"],
+            anthropic_api_key=config["llm_api_key"],
         )
         self.tools = {
             "bash": self._bash_tool,
