@@ -118,6 +118,20 @@ END_TASK_TOOL_SCHEMA: Dict[str, Any] = {
                         "include any information the user will need."
                     ),
                 },
+                "output_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional. Absolute paths of files YOU explicitly want "
+                        "to send back to the user. Only list files that are "
+                        "actually meant as deliverables — never temp / cache / "
+                        "log / intermediate files. Omit entirely (or pass []) "
+                        "when the task does not produce a file to share (e.g. "
+                        "a calculation, a yes/no answer). Paths must live "
+                        "inside the workdir; anything in `.inputs/` is "
+                        "rejected because those are caller-supplied inputs."
+                    ),
+                },
             },
             "required": ["success", "report"],
             "additionalProperties": False,
@@ -230,9 +244,26 @@ class ExecutorAgent:
             return f"ERROR:\n{result['error']}"
         return f"OUTPUT:\n{result.get('output', '')}"
 
-    def _end_task_tool(self, success: bool, report: str, session_id: str) -> dict:
-        self.logger.info("end_task_tool called", extra={"session_id": session_id, "success": success})
-        return {"success": success, "report": report}
+    def _end_task_tool(
+        self,
+        success: bool,
+        report: str,
+        session_id: str,
+        output_files: List[str] | None = None,
+    ) -> dict:
+        self.logger.info(
+            "end_task_tool called",
+            extra={
+                "session_id": session_id,
+                "success": success,
+                "output_files_count": len(output_files or []),
+            },
+        )
+        return {
+            "success": success,
+            "report": report,
+            "output_files": list(output_files or []),
+        }
 
     def _dispatch_tool(self, tool_name: str, arguments: Dict[str, Any], session_id: str) -> Any:
         """Run the named tool with ``arguments``. Raises ``KeyError`` for
@@ -250,33 +281,104 @@ class ExecutorAgent:
                 session_id=session_id,
             )
         if tool_name == "end_task":
+            raw_output_files = arguments.get("output_files")
+            if raw_output_files is None:
+                normalized_output_files: list[str] = []
+            elif isinstance(raw_output_files, list):
+                # Drop non-string entries defensively rather than crashing
+                # on a malformed tool call — a misbehaving model shouldn't
+                # be able to break the whole agent loop.
+                normalized_output_files = [
+                    str(p) for p in raw_output_files if isinstance(p, str) and p.strip()
+                ]
+            else:
+                self.logger.warning(
+                    "end_task: output_files was not a list (got %s); ignoring",
+                    type(raw_output_files).__name__,
+                    extra={"session_id": session_id},
+                )
+                normalized_output_files = []
             return self._end_task_tool(
                 success=bool(arguments.get("success", False)),
                 report=str(arguments.get("report", "") or ""),
                 session_id=session_id,
+                output_files=normalized_output_files,
             )
         raise KeyError(tool_name)
 
     # ------------------------------------------------------------------
     # Output collection / prompt construction
     # ------------------------------------------------------------------
-    def _collect_output_files(self, workdir: str) -> List[str]:
-        # ``<workdir>/.inputs/`` is where ``stage_inputs_into_workdir`` places
-        # caller-supplied input files so they are reachable inside the executor
-        # sidecar. Those bytes were *received*, not *produced*, so excluding the
-        # subtree prevents the bridge from echoing the same file back to the
-        # user as a fresh "output".
+    def _resolve_declared_output_files(
+        self,
+        workdir: str,
+        declared: List[str],
+        session_id: str,
+    ) -> List[str]:
+        """Validate the explicit ``output_files`` list passed to ``end_task``.
+
+        Only paths that meet ALL of the following are accepted:
+
+        - resolve to a regular file that exists,
+        - sit inside ``workdir`` (no traversal outside the sandbox),
+        - are NOT inside ``<workdir>/.inputs/`` (those are caller-supplied
+          inputs — echoing them back would dupe the user's own file as a
+          fresh "deliverable").
+
+        Anything else is dropped with a logged warning. Returning a strict
+        subset (rather than failing the whole task) lets the user still get
+        the textual report when the model lists a couple of bogus paths.
+        """
         from src.input_staging import is_input_path
 
-        files: list[str] = []
-        if os.path.isdir(workdir):
-            for root, _, filenames in os.walk(workdir):
-                for f in filenames:
-                    candidate = os.path.join(root, f)
-                    if is_input_path(workdir, candidate):
-                        continue
-                    files.append(candidate)
-        return files
+        if not declared:
+            return []
+
+        try:
+            workdir_real = os.path.realpath(workdir)
+        except OSError:
+            return []
+
+        accepted: list[str] = []
+        skipped: list[dict] = []
+        seen: set[str] = set()
+        for raw_path in declared:
+            try:
+                resolved = os.path.realpath(raw_path)
+            except OSError:
+                skipped.append({"path": raw_path, "reason": "realpath_failed"})
+                continue
+
+            if not os.path.isfile(resolved):
+                skipped.append({"path": raw_path, "reason": "not_a_file"})
+                continue
+
+            # Strict containment check — ``startswith`` alone would let
+            # ``<workdir>foo`` slip past, so anchor with the path separator.
+            if (
+                resolved != workdir_real
+                and not resolved.startswith(workdir_real + os.sep)
+            ):
+                skipped.append({"path": raw_path, "reason": "outside_workdir"})
+                continue
+
+            if is_input_path(workdir, resolved):
+                skipped.append({"path": raw_path, "reason": "is_input_file"})
+                continue
+
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            accepted.append(resolved)
+
+        if skipped:
+            self.logger.warning(
+                "end_task: dropped %d declared output_file(s)",
+                len(skipped),
+                extra={"session_id": session_id, "skipped": skipped},
+            )
+
+        return accepted
 
     def _build_system_prompt(self, instruction: str, input_files: List[str], workdir: str) -> str:
         files_str = "\n".join(input_files) if input_files else "None"
@@ -303,9 +405,16 @@ class ExecutorAgent:
             "alternative locations and do NOT invent new paths.\n"
             "- Write output files anywhere inside the workdir EXCEPT the "
             "`.inputs/` subdirectory (those are caller-supplied inputs and "
-            "will be filtered out of the result).\n"
+            "will be rejected if you try to ship them back).\n"
             "- When the instruction is fully resolved (or cannot be done), "
-            "call `end_task` exactly once and stop.\n\n"
+            "call `end_task` exactly once and stop.\n"
+            "- `end_task` accepts an OPTIONAL `output_files` list. Only "
+            "include paths of files that are deliverables for the user "
+            "(e.g. an extracted `report.pdf`, a generated chart). Skip the "
+            "argument entirely (or pass `[]`) for tasks that don't produce "
+            "a file (e.g. answering a question, doing a calculation). NEVER "
+            "list scratch / temp / cache / log / intermediate files — the "
+            "user only wants the final deliverable, not your workspace.\n\n"
             f"Workdir: {workdir}\n"
             f"Input files:\n{files_str}\n\n"
             f"Instruction: {instruction}"
@@ -599,7 +708,15 @@ class ExecutorAgent:
         if final_result is None:
             final_result = {"success": False, "report": "Agent reached max iterations without calling end_task."}
 
-        output_files = self._collect_output_files(workdir)
+        # Only files the agent EXPLICITLY listed in ``end_task(output_files=…)``
+        # are forwarded to the bridge. Walking the workdir would dump every
+        # scratch / cache / log file the agent left behind, which is exactly
+        # what we don't want. The validation step rejects paths outside the
+        # workdir or pointing at staged inputs.
+        declared_output_files = list(final_result.get("output_files") or [])
+        output_files = self._resolve_declared_output_files(
+            workdir, declared_output_files, session_id=session_id,
+        )
         processing_time = round(time.time() - start_time, 2)
 
         result_payload = {

@@ -60,3 +60,16 @@ def test_end_task_tool(_mock_llm_class):
     result = agent._end_task_tool(True, "Done", "s1")
     assert result["success"] is True
     assert result["report"] == "Done"
+    # No files declared -> empty list, never ``None``.
+    assert result["output_files"] == []
+
+
+@patch("src.agent.ChatOpenAI")
+def test_end_task_tool_passes_through_output_files(_mock_llm_class):
+    client = MagicMock()
+    sm = MagicMock()
+    agent = ExecutorAgent(client, sm)
+    result = agent._end_task_tool(
+        True, "Done", "s1", output_files=["/tmp/out.pdf"],
+    )
+    assert result["output_files"] == ["/tmp/out.pdf"]

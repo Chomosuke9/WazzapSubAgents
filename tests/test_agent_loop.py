@@ -228,34 +228,144 @@ def test_execute_passes_reason_to_progress(mock_llm_class):
     assert "Mengekstrak zip" in progress["reason"]
 
 
-def test_collect_output_files_excludes_inputs_subdir(tmp_path):
-    """Files staged into ``<workdir>/.inputs/`` must NOT show up in
-    ``output_files`` — otherwise the bridge would echo every input back to
-    the user as a fresh output."""
+def _make_resolver_agent():
+    """Build a bare ``ExecutorAgent`` for tests that exercise
+    ``_resolve_declared_output_files`` directly without bringing up the
+    full agent loop."""
+    client = MagicMock()
+    sm = MagicMock()
+    with patch("src.agent.ChatOpenAI"):
+        return ExecutorAgent(client, sm)
+
+
+def test_resolve_declared_output_files_only_returns_declared_paths(tmp_path):
+    """The agent must only ship files it explicitly listed in ``end_task``.
+    Scratch / cache / log files left lying around in the workdir must
+    NOT be auto-collected."""
+    workdir = tmp_path / "session-x"
+    workdir.mkdir()
+    deliverable = workdir / "report.pdf"
+    deliverable.write_bytes(b"%PDF-fake")
+    # Scratch files the agent left behind (cache, logs, intermediates).
+    (workdir / "scratch.tmp").write_text("intermediate")
+    (workdir / "pip-cache.log").write_text("log")
+    (workdir / "intermediate.bin").write_bytes(b"\x00")
+
+    agent = _make_resolver_agent()
+    accepted = agent._resolve_declared_output_files(
+        str(workdir), [str(deliverable)], session_id="s1",
+    )
+
+    assert accepted == [str(deliverable.resolve())]
+
+
+def test_resolve_declared_output_files_rejects_input_paths(tmp_path):
+    """Paths inside ``<workdir>/.inputs/`` must be dropped — those are
+    caller-supplied inputs and re-shipping them would dupe the user's
+    own file as a fresh deliverable."""
     from src.input_staging import INPUT_SUBDIR
 
     workdir = tmp_path / "session-x"
     workdir.mkdir()
-    # Outputs the agent "produced".
-    (workdir / "result.txt").write_text("real output")
-    nested = workdir / "subdir"
-    nested.mkdir()
-    (nested / "nested.bin").write_bytes(b"\x00\x01")
-    # Inputs that were staged in by the bridge.
     inputs = workdir / INPUT_SUBDIR
     inputs.mkdir()
-    (inputs / "user-doc.zip").write_bytes(b"input-bytes")
-    (inputs / "another.pdf").write_bytes(b"another")
+    user_doc = inputs / "user-doc.zip"
+    user_doc.write_bytes(b"input-bytes")
+    legit_output = workdir / "extracted.txt"
+    legit_output.write_text("hello")
 
-    client = MagicMock()
-    sm = MagicMock()
-    with patch("src.agent.ChatOpenAI"):
-        agent = ExecutorAgent(client, sm)
+    agent = _make_resolver_agent()
+    accepted = agent._resolve_declared_output_files(
+        str(workdir), [str(user_doc), str(legit_output)], session_id="s1",
+    )
 
-    collected = agent._collect_output_files(str(workdir))
-    basenames = sorted(p.split("/")[-1] for p in collected)
-    assert "result.txt" in basenames
-    assert "nested.bin" in basenames
-    # The two input files must be filtered out.
-    assert "user-doc.zip" not in basenames
-    assert "another.pdf" not in basenames
+    assert accepted == [str(legit_output.resolve())]
+
+
+def test_resolve_declared_output_files_rejects_paths_outside_workdir(tmp_path):
+    """The validator must refuse paths outside the workdir even if they
+    exist — a misbehaving agent shouldn't be able to exfiltrate
+    arbitrary host files via the output channel."""
+    workdir = tmp_path / "session-x"
+    workdir.mkdir()
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("not yours")
+    inside = workdir / "ok.txt"
+    inside.write_text("yours")
+
+    agent = _make_resolver_agent()
+    accepted = agent._resolve_declared_output_files(
+        str(workdir), [str(outside), str(inside)], session_id="s1",
+    )
+
+    assert accepted == [str(inside.resolve())]
+
+
+def test_resolve_declared_output_files_drops_missing_and_dirs(tmp_path):
+    """Non-existent paths and directories must be dropped — only regular
+    files are valid deliverables."""
+    workdir = tmp_path / "session-x"
+    workdir.mkdir()
+    (workdir / "subdir").mkdir()
+    real_file = workdir / "ok.txt"
+    real_file.write_text("real")
+
+    agent = _make_resolver_agent()
+    accepted = agent._resolve_declared_output_files(
+        str(workdir),
+        [
+            str(workdir / "ghost.txt"),  # missing
+            str(workdir / "subdir"),  # directory
+            str(real_file),
+        ],
+        session_id="s1",
+    )
+
+    assert accepted == [str(real_file.resolve())]
+
+
+def test_resolve_declared_output_files_returns_empty_for_empty_input(tmp_path):
+    """An empty / omitted ``output_files`` list must result in an empty
+    list — this is the calculator-only case where the agent has nothing
+    to ship."""
+    workdir = tmp_path / "session-x"
+    workdir.mkdir()
+    # Some scratch left around — must NOT auto-leak even though the list
+    # is empty.
+    (workdir / "scratch.tmp").write_text("nope")
+
+    agent = _make_resolver_agent()
+    assert agent._resolve_declared_output_files(str(workdir), [], session_id="s1") == []
+
+
+def test_end_task_dispatch_normalizes_output_files():
+    """The ``end_task`` dispatch path must normalise weird inputs (None,
+    non-list, non-string entries) into a clean list-of-strings rather
+    than crashing the agent loop."""
+    agent = _make_resolver_agent()
+
+    # None / missing -> []
+    out = agent._dispatch_tool(
+        "end_task", {"success": True, "report": "ok"}, session_id="s1",
+    )
+    assert out == {"success": True, "report": "ok", "output_files": []}
+
+    # Non-list -> [] with a warning logged
+    out = agent._dispatch_tool(
+        "end_task",
+        {"success": True, "report": "ok", "output_files": "not-a-list"},
+        session_id="s1",
+    )
+    assert out["output_files"] == []
+
+    # Mixed list -> only non-empty strings survive
+    out = agent._dispatch_tool(
+        "end_task",
+        {
+            "success": True,
+            "report": "ok",
+            "output_files": ["/tmp/a", 42, "", "  ", "/tmp/b"],
+        },
+        session_id="s1",
+    )
+    assert out["output_files"] == ["/tmp/a", "/tmp/b"]
