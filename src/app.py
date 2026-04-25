@@ -36,7 +36,18 @@ def create_app(docker_mgr: DockerManager) -> Flask:
         if not session_id or not instruction:
             return jsonify({"success": False, "report": "Missing session_id or instruction"}), 400
 
-        session = session_manager.get_or_create(session_id)
+        try:
+            session = session_manager.get_or_create(session_id)
+        except ValueError as exc:
+            # SessionManager.get_or_create raises ValueError for session_ids
+            # that fail path-traversal validation (``..``, empty, dot-only).
+            # Surface as 400 — this is a client validation failure, not a
+            # server fault, so callers should not retry.
+            logger.warning(
+                "Rejected /execute: invalid session_id",
+                extra={"session_id": session_id, "error": str(exc)},
+            )
+            return jsonify({"success": False, "report": str(exc)}), 400
         session_manager.set_callback(session_id, callback_url, progress_webhook)
 
         def run_agent():
