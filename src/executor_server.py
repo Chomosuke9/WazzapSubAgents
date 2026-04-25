@@ -2,6 +2,7 @@ import io
 import os
 import subprocess
 import sys
+import threading
 import traceback
 
 from flask import Flask, request, jsonify
@@ -9,6 +10,12 @@ from flask import Flask, request, jsonify
 from src.logger import get_logger
 
 logger = get_logger("executor-server")
+
+# Guards the global stdout/stderr swap done while exec()-ing user code.
+# Two concurrent /python requests would otherwise share the same redirected
+# stdout buffer and the first one to finish would restore stdout out from
+# under the other, garbling captured output.
+_PY_EXEC_LOCK = threading.Lock()
 
 
 def create_executor_app() -> Flask:
@@ -45,32 +52,32 @@ def create_executor_app() -> Flask:
         workdir = os.path.join(workdir_base, session_id)
         os.makedirs(workdir, exist_ok=True)
         logger.info("Executing python", extra={"session_id": session_id, "code": code[:200]})
-        output_buffer = io.StringIO()
-        try:
-            # Redirect stdout/stderr to capture prints
+        # Serialize exec() because we redirect process-global stdout/stderr.
+        # Without this lock, concurrent requests step on each other's buffer.
+        with _PY_EXEC_LOCK:
+            output_buffer = io.StringIO()
             old_stdout = sys.stdout
             old_stderr = sys.stderr
             sys.stdout = output_buffer
             sys.stderr = output_buffer
-            exec_globals = {
-                "__builtins__": __builtins__,
-                "sys": sys,
-                "os": os,
-                "io": io,
-                "json": __import__("json"),
-                "math": __import__("math"),
-                "re": __import__("re"),
-                "datetime": __import__("datetime"),
-            }
-            exec(code, exec_globals)
-        except Exception:
-            error_text = traceback.format_exc()
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
-            return jsonify({"error": error_text})
-        finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
+            try:
+                exec_globals = {
+                    "__builtins__": __builtins__,
+                    "sys": sys,
+                    "os": os,
+                    "io": io,
+                    "json": __import__("json"),
+                    "math": __import__("math"),
+                    "re": __import__("re"),
+                    "datetime": __import__("datetime"),
+                }
+                exec(code, exec_globals)
+            except Exception:
+                error_text = traceback.format_exc()
+                return jsonify({"error": error_text})
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
         return jsonify({"output": output_buffer.getvalue()})
 
     @app.get("/health")

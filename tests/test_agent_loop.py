@@ -55,7 +55,12 @@ def test_execute_max_iterations(mock_llm_class):
     sm = MagicMock()
     mock_llm = MagicMock()
     mock_llm_class.return_value = mock_llm
-    mock_llm.invoke.return_value = MagicMock(content='{"tool": "bash", "arguments": {"command": "echo hi"}}')
+    # Vary the command each turn so the stuck-loop detector does not trip
+    # before the 50-iteration cap.
+    mock_llm.invoke.side_effect = [
+        MagicMock(content=f'{{"tool": "bash", "arguments": {{"command": "echo {i}"}}}}')
+        for i in range(60)
+    ]
 
     agent = ExecutorAgent(client, sm)
     result = agent.execute("s1", "do something", [], "/tmp/work/s1")
@@ -63,3 +68,69 @@ def test_execute_max_iterations(mock_llm_class):
     assert "max iterations" in result["report"]
     # progress reported on each bash call (50 iterations)
     assert sm.append_progress.call_count == 50
+
+
+@patch("src.agent.ChatOpenAI")
+def test_execute_stops_on_stuck_loop(mock_llm_class):
+    client = MagicMock()
+    sm = MagicMock()
+    client.run_bash.return_value = {"stdout": "", "stderr": "", "returncode": 0}
+    mock_llm = MagicMock()
+    mock_llm_class.return_value = mock_llm
+    mock_llm.invoke.return_value = MagicMock(
+        content='{"tool": "bash", "arguments": {"command": "echo hi"}}'
+    )
+
+    agent = ExecutorAgent(client, sm)
+    result = agent.execute("s2", "do something", [], "/tmp/work/s2")
+    assert result["success"] is False
+    assert "stuck" in result["report"].lower()
+    # The 5th identical call trips the detector before its bash runs, so the
+    # tool itself only executes 4 times.
+    assert sm.append_progress.call_count == 4
+
+
+@patch("src.agent.ChatOpenAI")
+def test_execute_retries_transient_llm_error(mock_llm_class, monkeypatch):
+    """Rate-limit / 5xx during llm.invoke should retry, not kill the task."""
+    import src.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "LLM_RETRY_BASE_BACKOFF", 0.0)
+    monkeypatch.setattr(agent_module, "LLM_RETRY_MAX_BACKOFF", 0.0)
+    monkeypatch.setattr(agent_module, "LLM_RETRY_MAX", 5)
+
+    client = MagicMock()
+    sm = MagicMock()
+    mock_llm = MagicMock()
+    mock_llm_class.return_value = mock_llm
+
+    class _RateLimitError(Exception):
+        status_code = 429
+
+    success_response = MagicMock(
+        content='{"tool": "end_task", "arguments": {"success": true, "report": "ok"}}'
+    )
+    mock_llm.invoke.side_effect = [_RateLimitError("429"), _RateLimitError("429"), success_response]
+
+    agent = agent_module.ExecutorAgent(client, sm)
+    result = agent.execute("s3", "do something", [], "/tmp/work/s3")
+    assert result["success"] is True
+    assert result["report"] == "ok"
+    assert mock_llm.invoke.call_count == 3
+
+
+@patch("src.agent.ChatOpenAI")
+def test_execute_extracts_native_tool_calls(mock_llm_class):
+    """LangChain-style ``tool_calls`` should be preferred over JSON-in-content."""
+    client = MagicMock()
+    sm = MagicMock()
+    mock_llm = MagicMock()
+    mock_llm_class.return_value = mock_llm
+    response = MagicMock(content="")
+    response.tool_calls = [{"name": "end_task", "args": {"success": True, "report": "native"}}]
+    mock_llm.invoke.return_value = response
+
+    agent = ExecutorAgent(client, sm)
+    result = agent.execute("s4", "do something", [], "/tmp/work/s4")
+    assert result["success"] is True
+    assert result["report"] == "native"

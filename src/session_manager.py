@@ -86,13 +86,33 @@ class SessionManager:
                     self._fire_webhook(session.progress_webhook, payload)
 
     def _fire_webhook(self, url: str, payload: dict) -> None:
+        max_attempts = int(os.getenv("WEBHOOK_RETRY_MAX", "5"))
+        base_backoff = float(os.getenv("WEBHOOK_RETRY_BASE_BACKOFF", "1.0"))
+        max_backoff = float(os.getenv("WEBHOOK_RETRY_MAX_BACKOFF", "30.0"))
+
         def _send():
-            try:
-                response = requests.post(url, json=payload, timeout=30)
-                response.raise_for_status()
-                logger.info("Webhook sent", extra={"url": url, "status_code": response.status_code})
-            except Exception as e:
-                logger.error("Webhook failed", extra={"url": url, "error": str(e)})
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = requests.post(url, json=payload, timeout=30)
+                    response.raise_for_status()
+                    logger.info(
+                        "Webhook sent",
+                        extra={"url": url, "status_code": response.status_code, "attempt": attempt},
+                    )
+                    return
+                except Exception as e:
+                    if attempt >= max_attempts:
+                        logger.error(
+                            "Webhook failed permanently",
+                            extra={"url": url, "error": str(e), "attempts": attempt},
+                        )
+                        return
+                    backoff = min(max_backoff, base_backoff * (2 ** (attempt - 1)))
+                    logger.warning(
+                        "Webhook failed; retrying",
+                        extra={"url": url, "error": str(e), "attempt": attempt, "backoff_s": backoff},
+                    )
+                    time.sleep(backoff)
 
         threading.Thread(target=_send, daemon=True).start()
 
