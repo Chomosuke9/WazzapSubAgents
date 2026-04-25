@@ -487,15 +487,15 @@ class ExecutorAgent:
                     },
                 )
                 response = self.llm.invoke(messages)
-                self.logger.info(
-                    "LLM response received",
-                    extra={
-                        "session_id": session_id,
-                        "response_type": type(response).__name__,
-                        "response_keys": list(response.keys()) if hasattr(response, "keys") else "N/A",
-                        "tool_calls": response.get("tool_calls") if hasattr(response, "get") else "N/A",
-                    },
-                )
+                print("Response type:", type(response))
+                print("Has tool_calls attr?", hasattr(response, "tool_calls"))
+
+                if hasattr(response, "tool_calls"):
+                    print("tool_calls:", response.tool_calls)
+                    if response.tool_calls:
+                        print("First tool_call:", response.tool_calls[0])
+                        print("First tool_call type:", type(response.tool_calls[0]))
+                        print("First tool_call dir:", [x for x in dir(response.tool_calls[0]) if not x.startswith('_')])
                 return response
             except Exception as err:  # pylint: disable=broad-except
                 last_err = err
