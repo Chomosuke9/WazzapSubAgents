@@ -30,15 +30,18 @@ def create_app(docker_mgr: DockerManager) -> Flask:
         session_id = data.get("session_id")
         instruction = data.get("instruction")
         input_files = data.get("input_files", [])
+        callback_url = data.get("callback_url")
+        progress_webhook = data.get("progress_webhook")
 
         if not session_id or not instruction:
             return jsonify({"success": False, "report": "Missing session_id or instruction"}), 400
 
         session = session_manager.get_or_create(session_id)
+        session_manager.set_callback(session_id, callback_url, progress_webhook)
 
         def run_agent():
             try:
-                agent = ExecutorAgent(container_client)
+                agent = ExecutorAgent(container_client, session_manager)
                 result = agent.execute(
                     session_id=session_id,
                     instruction=instruction,

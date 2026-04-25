@@ -1,0 +1,97 @@
+# Prompt Sesi 1: WazzapSubAgents (Executor Service)
+
+## Goal
+Tambahkan kemampuan **push notification via webhook** ke Executor Service. Executor harus bisa memberi tahu client (WazzapAgents Python Bridge) secara proaktif kalau task selesai atau sedang berprogress, tanpa menghilangkan kemampuan polling yang sudah ada.
+
+## API Contract (Kontrak Komunikasi)
+
+### Incoming: Client -> Executor
+**Endpoint:** `POST /execute`
+**Body tambahan (opsional):**
+```json
+{
+  "session_id": "string",
+  "instruction": "string",
+  "input_files": ["string"],
+  "callback_url": "http://localhost:8081/subagent/callback?session_id=xxx",
+  "progress_webhook": "http://localhost:8081/subagent/callback?session_id=xxx&type=progress"
+}
+```
+
+### Outgoing: Executor -> Client (Webhook Push)
+**Method:** `POST {callback_url}`
+**Payload saat task selesai:**
+```json
+{
+  "type": "complete",
+  "session_id": "user_123_task_abc",
+  "result": {
+    "session_id": "user_123_task_abc",
+    "success": true,
+    "report": "Extracted 3 tables...",
+    "output_files": ["/tmp/work/.../table1.csv"],
+    "processing_time_sec": 42.5
+  }
+}
+```
+
+**Payload saat progress update:**
+```json
+{
+  "type": "progress",
+  "session_id": "user_123_task_abc",
+  "entry": {
+    "step": "bash:ls",
+    "detail": "ls -la /storage/",
+    "timestamp": 1712345678.123
+  }
+}
+```
+
+### Fallback Polling (tetap ada)
+**Endpoint:** `GET /sessions/{session_id}/result` -- tidak berubah.
+
+## Implementasi Checklist
+
+### 1. `src/session_manager.py`
+- [ ] Modifikasi dataclass `Session`:
+  ```python
+  @dataclass
+  class Session:
+      session_id: str
+      workdir: str
+      callback_url: str | None = None
+      progress_webhook: str | None = None
+      progress_logs: list[dict] = field(default_factory=list)
+      last_activity: float = field(default_factory=time.time)
+      status: str = "active"
+      result: Optional[dict] = None
+  ```
+- [ ] Tambahkan method:
+  - `set_callback(session_id, callback_url, progress_webhook)` -- simpan ke session
+  - `append_progress(session_id, entry: dict)` -- append ke `progress_logs`, lalu fire `progress_webhook` async via `threading.Thread`
+  - Modifikasi `store_result(session_id, result)` -- setelah store result, fire `callback_url` async via `threading.Thread` (gunakan `requests.post`, timeout 30s, jangan crash kalau gagal, cukup log error). Hindari double-fire dengan flag `_callback_sent`.
+- [ ] Tambahkan private method `_fire_webhook(url: str, payload: dict)` yang wrap `requests.post` dalam `try/except`.
+
+### 2. `src/app.py`
+- [ ] Di endpoint `POST /execute`, extract `callback_url` dan `progress_webhook` dari JSON body.
+- [ ] Setelah `session_manager.get_or_create(session_id)`, panggil `session_manager.set_callback(session_id, callback_url, progress_webhook)`.
+
+### 3. `src/agent.py`
+- [ ] Setiap kali tool `bash` atau `python` dieksekusi (sebelum atau setelah eksekusi), panggil:
+  ```python
+  self.session_manager.append_progress(session_id, {
+      "step": f"tool:{tool_name}",
+      "detail": str(arguments)[:500],
+      "timestamp": time.time()
+  })
+  ```
+  (Inject `session_manager` ke `ExecutorAgent` via constructor atau akses global yang aman.)
+- [ ] Saat `end_task` dipanggil, tidak perlu ubah -- `store_result` sudah handle webhook.
+
+## Acceptance Criteria
+1. `POST /execute` dengan `callback_url` -> setelah task selesai, Executor melakukan HTTP POST ke callback_url dengan payload `type: complete`.
+2. `POST /execute` dengan `progress_webhook` -> setiap tool call, Executor melakukan HTTP POST ke progress_webhook dengan payload `type: progress`.
+3. Jika callback gagal (network error), Executor tetap berjalan normal, hanya log error.
+4. Polling `GET /sessions/{id}/result` tetap berfungsi persis seperti sebelumnya.
+5. Jika `callback_url` tidak dikirim, behavior tetap seperti sebelumnya (silent, polling only).

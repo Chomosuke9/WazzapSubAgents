@@ -1,0 +1,225 @@
+# Prompt Sesi 2: WazzapAgents Python Bridge
+
+## Goal
+Integrasikan WazzapAgents dengan WazzapSubAgents sehingga LLM2 bisa memanggil sub-agent untuk task kompleks, menerima hasilnya via webhook push (dengan fallback polling), dan menganalisis hasilnya untuk membuat reply final ke user.
+
+## API Contract (Kontrak Komunikasi)
+
+### Outgoing: Bridge -> SubAgent
+**Method:** `POST http://localhost:5000/execute`
+**Body:**
+```json
+{
+  "session_id": "chat123_abc_1712345678",
+  "instruction": "Extract tables from /storage/doc.pdf and save as CSV",
+  "input_files": ["/storage/doc.pdf"],
+  "callback_url": "http://localhost:8081/subagent/callback?session_id=chat123_abc_1712345678",
+  "progress_webhook": "http://localhost:8081/subagent/callback?session_id=chat123_abc_1712345678&type=progress"
+}
+```
+**Response:** `202 Accepted` -- task diterima, sedang berjalan.
+
+### Incoming: SubAgent -> Bridge (Webhook Push)
+**Endpoint yang harus dibuka:** `POST /subagent/callback` (aiohttp server port 8081)
+**Payload completion:**
+```json
+{
+  "type": "complete",
+  "session_id": "chat123_abc_1712345678",
+  "result": {
+    "session_id": "...",
+    "success": true,
+    "report": "...",
+    "output_files": [],
+    "processing_time_sec": 42.5
+  }
+}
+```
+**Payload progress:**
+```json
+{
+  "type": "progress",
+  "session_id": "chat123_abc_1712345678",
+  "entry": {
+    "step": "bash:ls",
+    "detail": "ls -la /storage/",
+    "timestamp": 1712345678.123
+  }
+}
+```
+
+### Fallback Polling
+**Method:** `GET http://localhost:5000/sessions/{session_id}/result`
+**Digunakan hanya jika webhook tidak diterima dalam timeout 10 menit.**
+
+## Implementasi Checklist
+
+### 1. Buat Folder Baru: `python/bridge/subagent/`
+
+**File: `python/bridge/subagent/__init__.py`**
+- [ ] Export `SubTaskTracker`, `SubAgentClient`, `SubAgentWebhookServer`
+
+**File: `python/bridge/subagent/models.py`**
+- [ ] Dataclass `ProgressEntry(step, detail, timestamp)`
+- [ ] Dataclass `SubTask(session_id, instruction, chat_id, status, start_time, end_time, progress, result, report)` dengan property `elapsed_seconds`
+
+**File: `python/bridge/subagent/tracker.py`**
+- [ ] Class `SubTaskTracker`:
+  - `__init__`: `_active: dict[session_id, SubTask]`, `_history: dict[chat_id, deque[SubTask]]`
+  - `register(task: SubTask)`
+  - `update_progress(session_id, step, detail)` -- append ProgressEntry ke active task
+  - `finalize(session_id, result)` -- pop dari active, masukkan ke history, set status & end_time
+  - `get_active_for_chat(chat_id) -> SubTask | None`
+  - `format_context(chat_id) -> str | None` -- format PERSIS seperti:
+    ```
+    ## Task information
+    - {instruction}
+
+    ## Sub-Agent history:
+    - {step1}: {detail1}
+    - {step2}: {detail2}
+    ...
+
+    ## Information
+    - Sub-Agent is currently running for { Xm Ys }
+    - <tambahan info lain jika perlu>
+    ```
+
+**File: `python/bridge/subagent/client.py`**
+- [ ] Class `SubAgentClient`:
+  - `__init__(base_url, webhook_url)` -- dari env `SUBAGENT_URL`, `SUBAGENT_WEBHOOK_URL`
+  - `async submit(session_id, instruction, input_files)` -- `run_in_executor` wrapping `requests.post` ke `/execute` dengan callback_url & progress_webhook
+  - `async poll_result(session_id)` -- loop poll `GET /sessions/{id}/result` setiap 5 detik, max 120 kali. Return dict atau None.
+
+**File: `python/bridge/subagent/webhook_server.py`**
+- [ ] Class `SubAgentWebhookServer` (aiohttp):
+  - Port dari env `SUBAGENT_WEBHOOK_PORT` (default 8081)
+  - `POST /subagent/callback`:
+    - Parse JSON, baca `type`, `session_id`
+    - Kalau `type == "progress"` -> panggil `tracker.update_progress()`
+    - Kalau `type == "complete"` -> panggil `tracker.finalize()`, lalu trigger `asyncio.Event` yang terdaftar untuk session_id
+  - `register_completion_event(session_id, asyncio.Event)` -- bridge main.py pakai ini untuk nunggu
+  - `GET /health` -> `{"status": "ok"}`
+
+**File: `python/bridge/subagent/config.py`**
+- [ ] Baca env: `SUBAGENT_URL`, `SUBAGENT_WEBHOOK_PORT`, `SUBAGENT_WEBHOOK_URL`, `SUBAGENT_POLL_INTERVAL`, `SUBAGENT_MAX_POLL_ATTEMPTS`
+
+### 2. Modifikasi `python/bridge/llm/schemas.py`
+- [ ] Definisikan `LLM2_SUBAGENT_TOOL` (JSON Schema function calling):
+  - `name: "execute_subtask"`
+  - `parameters: {instruction: string, input_files: string[]}`
+- [ ] Modifikasi `build_llm2_tools(*, allow_delete, allow_mute, allow_kick, allow_subagent=False)`:
+  - Tool subagent hanya ditambahkan jika `allow_subagent=True`
+
+### 3. Modifikasi `python/bridge/messaging/actions.py`
+- [ ] Di `_extract_actions_from_tool_calls()`, tambah handler:
+  - `name == "execute_subtask"` -> action dict: `{"type": "execute_subtask", "instruction": ..., "inputFiles": [...]}`
+
+### 4. Modifikasi `python/bridge/main.py`
+- [ ] Import semua dari `subagent`
+- [ ] Instansiasi global:
+  ```python
+  subagent_tracker = SubTaskTracker()
+  subagent_client = SubAgentClient()
+  subagent_webhook = SubAgentWebhookServer(subagent_tracker)
+  ```
+- [ ] Di awal bootstrap (`handle_socket` atau sebelumnya), start webhook server:
+  ```python
+  await subagent_webhook.start()
+  ```
+- [ ] Sebelum memanggil `generate_reply()`, inject subagent context ke history:
+  ```python
+  subagent_context = subagent_tracker.format_context(chat_id)
+  if subagent_context:
+      llm2_history.append(WhatsAppMessage(
+          timestamp_ms=int(time.time()*1000),
+          sender="system",
+          text=subagent_context,
+          role="system",
+      ))
+  ```
+- [ ] Saat build tools untuk LLM2, tentukan `allow_subagent` berdasarkan per-chat setting (bisa hardcode `False` dulu untuk default, atau baca dari DB jika sudah ada mekanismenya). **Default harus False.**
+- [ ] Di dalam loop `for action in actions:` (setelah semua action lain), tambah handler:
+  ```python
+  if action_type == "execute_subtask":
+      import uuid
+      session_id = f"{chat_id}_{uuid.uuid4().hex[:8]}_{int(time.time())}"
+      instruction = action["instruction"]
+      input_files = action.get("inputFiles", [])
+
+      task = SubTask(session_id=session_id, instruction=instruction, chat_id=chat_id)
+      subagent_tracker.register(task)
+
+      # Submit ke subagent (async, non-blocking)
+      await subagent_client.submit(session_id, instruction, input_files)
+
+      # Setup tunggu webhook
+      completion_event = asyncio.Event()
+      subagent_webhook.register_completion_event(session_id, completion_event)
+
+      # TUNGGU webhook completion (max 10 menit)
+      try:
+          await asyncio.wait_for(completion_event.wait(), timeout=600)
+      except asyncio.TimeoutError:
+          # Fallback polling
+          result = await subagent_client.poll_result(session_id)
+          if result:
+              subagent_tracker.finalize(session_id, result)
+          else:
+              subagent_tracker.finalize(session_id, {"success": False, "report": "Timeout waiting for sub-agent"})
+
+      # Inject hasil ke history sebagai system message
+      finalized = subagent_tracker._history.get(chat_id)
+      if finalized:
+          final_task = finalized[-1]
+          history.append(WhatsAppMessage(
+              timestamp_ms=int(time.time()*1000),
+              sender="system",
+              text=f"[SUBTASK FINISHED]\nResult: {final_task.report or 'No report'}\nSuccess: {final_task.status == 'completed'}",
+              role="system",
+          ))
+
+      # RE-INVOKE LLM2 dengan context baru
+      # Build ulang current burst atau gunakan history yang sudah diupdate
+      reply_msg = await generate_reply(
+          llm2_history,  # sudah termasuk hasil subtask
+          current,       # bisa None atau rebuild
+          current_payload=llm2_payload,
+          ... # parameter lain sama
+      )
+
+      # Proses reply_msg kedua persis seperti normal (extract actions, kirim ke user)
+      # PERHATIAN: Hindari infinite loop -- generate_reply kedua tidak boleh menghasilkan execute_subtask lagi.
+      # Solusi: sementara override allow_subagent=False saat re-invoke, atau cek di loop.
+  ```
+
+### 5. Modifikasi `python/bridge/config.py`
+- [ ] Tambahkan konstanta env untuk subagent (lihat `subagent/config.py`)
+
+### 6. Modifikasi `.env.example`
+- [ ] Tambahkan:
+  ```
+  SUBAGENT_URL=http://localhost:5000
+  SUBAGENT_WEBHOOK_PORT=8081
+  SUBAGENT_WEBHOOK_URL=http://localhost:8081/subagent/callback
+  SUBAGENT_POLL_INTERVAL=5.0
+  SUBAGENT_MAX_POLL_ATTEMPTS=120
+  SUBAGENT_ENABLED_DEFAULT=false
+  ```
+
+## Acceptance Criteria
+1. LLM2 tidak melihat tool `execute_subtask` kecuali jika `allow_subagent=True` (default False).
+2. Saat tool dipanggil, task dikirim ke `localhost:5000/execute` dengan `callback_url` dan `progress_webhook`.
+3. Webhook server di port 8081 menerima push dari SubAgent dan mengupdate tracker.
+4. Progress tracking visible di context injection: setiap generate_reply selama task berjalan melihat status real-time.
+5. Setelah task selesai (via webhook atau fallback polling), LLM2 di-re-invoke dengan hasil subtask di history.
+6. User menerima reply final dari LLM2 yang menganalisis hasil subtask.
+7. Tidak ada typing indicator (`send_typing`) yang dikirim selama subtask berjalan.
+8. Jika webhook gagal (SubAgent tidak bisa reach port 8081), fallback polling tetap berfungsi dalam 10 menit.
+
+## Catatan Penting untuk Build Agent
+- **JANGAN** mengubah file `src/wa/` atau bagian Node.js dari WazzapAgents -- hanya Python Bridge.
+- **JANGAN** mengubah port atau format response `GET /sessions/{id}/result` di WazzapSubAgents.
+- **JANGAN** tambahkan typing indicator saat subtask berjalan.
+- **PASTIKAN** `format_context()` menghasilkan output persis dengan format yang diminta user.
+- **PASTIKAN** re-invoke LLM2 tidak infinite loop: either set `allow_subagent=False` saat re-invoke, atau break loop setelah re-invoke selesai.

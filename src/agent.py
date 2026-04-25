@@ -10,13 +10,15 @@ from langchain_core.tools import tool
 from src.config import config
 from src.container_client import ContainerClient
 from src.logger import get_logger
+from src.session_manager import SessionManager
 
 logger = get_logger(__name__)
 
 
 class ExecutorAgent:
-    def __init__(self, container_client: ContainerClient, logger_override=None):
+    def __init__(self, container_client: ContainerClient, session_manager: SessionManager, logger_override=None):
         self.container_client = container_client
+        self.session_manager = session_manager
         self.logger = logger_override or logger
         self.llm = ChatAnthropic(
             model=config["agent_model"],
@@ -31,6 +33,11 @@ class ExecutorAgent:
         }
 
     def _bash_tool(self, command: str, session_id: str) -> str:
+        self.session_manager.append_progress(session_id, {
+            "step": "bash",
+            "detail": str({"command": command})[:500],
+            "timestamp": time.time(),
+        })
         result = self.container_client.run_bash(command, session_id=session_id)
         self.logger.info(
             "bash_tool executed",
@@ -44,6 +51,11 @@ class ExecutorAgent:
         return output
 
     def _python_tool(self, code: str, session_id: str) -> str:
+        self.session_manager.append_progress(session_id, {
+            "step": "python",
+            "detail": str({"code": code})[:500],
+            "timestamp": time.time(),
+        })
         result = self.container_client.run_python(code, session_id=session_id)
         self.logger.info("python_tool executed", extra={"session_id": session_id, "code": code[:200]})
         if "error" in result:

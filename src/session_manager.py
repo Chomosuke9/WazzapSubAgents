@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+import requests
+
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -14,9 +16,13 @@ logger = get_logger(__name__)
 class Session:
     session_id: str
     workdir: str
+    callback_url: str | None = None
+    progress_webhook: str | None = None
+    progress_logs: list[dict] = field(default_factory=list)
     last_activity: float = field(default_factory=time.time)
     status: str = "active"
     result: Optional[dict] = None
+    _callback_sent: bool = field(default=False, repr=False)
 
 
 class SessionManager:
@@ -40,6 +46,14 @@ class SessionManager:
             logger.info("Session created", extra={"session_id": session_id, "workdir": workdir})
             return session
 
+    def set_callback(self, session_id: str, callback_url: Optional[str], progress_webhook: Optional[str]) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.callback_url = callback_url
+                session.progress_webhook = progress_webhook
+                logger.info("Callback URLs set", extra={"session_id": session_id, "callback_url": callback_url, "progress_webhook": progress_webhook})
+
     def store_result(self, session_id: str, result: dict) -> None:
         with self._lock:
             session = self._sessions.get(session_id)
@@ -48,6 +62,39 @@ class SessionManager:
                 session.last_activity = time.time()
                 session.status = "completed"
                 logger.info("Result stored", extra={"session_id": session_id})
+                if session.callback_url and not session._callback_sent:
+                    session._callback_sent = True
+                    payload = {
+                        "type": "complete",
+                        "session_id": session_id,
+                        "result": result,
+                    }
+                    self._fire_webhook(session.callback_url, payload)
+
+    def append_progress(self, session_id: str, entry: dict) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.progress_logs.append(entry)
+                session.last_activity = time.time()
+                if session.progress_webhook:
+                    payload = {
+                        "type": "progress",
+                        "session_id": session_id,
+                        "entry": entry,
+                    }
+                    self._fire_webhook(session.progress_webhook, payload)
+
+    def _fire_webhook(self, url: str, payload: dict) -> None:
+        def _send():
+            try:
+                response = requests.post(url, json=payload, timeout=30)
+                response.raise_for_status()
+                logger.info("Webhook sent", extra={"url": url, "status_code": response.status_code})
+            except Exception as e:
+                logger.error("Webhook failed", extra={"url": url, "error": str(e)})
+
+        threading.Thread(target=_send, daemon=True).start()
 
     def get_result(self, session_id: str) -> Optional[dict]:
         with self._lock:
