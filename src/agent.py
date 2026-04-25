@@ -650,6 +650,7 @@ class ExecutorAgent:
                     messages.append(ToolMessage(
                         content=f"Tool '{tool_name}' is not available. Use bash, python, or end_task.",
                         tool_call_id=tc_id,
+                        name=tool_name,
                     ))
                     continue
 
@@ -700,6 +701,7 @@ class ExecutorAgent:
                 messages.append(ToolMessage(
                     content=str(result),
                     tool_call_id=tc_id,
+                    name=tool_name,
                 ))
 
             if end_task_called:
