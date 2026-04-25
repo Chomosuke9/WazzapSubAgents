@@ -1,73 +1,93 @@
 # Stage 1: Build (install dependencies once)
 FROM python:3.11-slim as builder
-
 WORKDIR /app
 
-# Install system deps required for building & runtime libraries
+# Install system deps required for building Python packages
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
     gcc \
     g++ \
-    libglib2.0-0 \
+    pkg-config \
+    python3-dev \
+    libssl-dev \
+    libffi-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    libblas-dev \
+    liblapack-dev \
+    libopenblas-dev \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
     libglib2.0-dev \
-    libgirepository1.0-dev \
     libcairo2-dev \
-    pkg-config \
-    python3-dev \
-    libxml2-dev \
-    libxslt1-dev \
-    libffi-dev \
-    libssl-dev \
-    libblas-dev \
-    liblapack-dev \
-    libportaudio2 \
     poppler-utils \
     tesseract-ocr \
     ghostscript \
-    libmagic1 \
-    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies (cached layer)
-COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
-
-# PyGObject requires system cairo/gobject libs (installed above)
-RUN pip install --no-cache-dir --user PyGObject
+# Install Python dependencies directly (Docker-specific libraries)
+RUN pip install --no-cache-dir --user \
+    Flask==3.0.0 \
+    langchain==0.1.20 \
+    langchain-openai==0.1.0 \
+    openai==1.30.0 \
+    python-dotenv==1.0.0 \
+    requests==2.31.0 \
+    httpx==0.27.2 \
+    docker==7.0.0 \
+    python-json-logger==2.0.7 \
+    pytest==7.4.3 \
+    pytest-asyncio==0.21.1 \
+    pdfplumber \
+    pdf2image \
+    pdfminer.six \
+    pypdf \
+    pytesseract \
+    Pillow \
+    opencv-python-headless \
+    scikit-image \
+    imageio \
+    numpy \
+    pandas \
+    beautifulsoup4 \
+    lxml \
+    openpyxl \
+    xlsxwriter \
+    python-docx \
+    python-pptx \
+    reportlab \
+    markdownify \
+    scipy \
+    sympy \
+    py7zr \
+    rarfile
 
 # Stage 2: Runtime (copy pre-installed packages only)
 FROM python:3.11-slim
-
 WORKDIR /app
 
-# Install runtime system deps (same set minus build tools)
+# Install runtime system libs (only what's needed from requirements.txt)
 RUN apt-get update && apt-get install -y \
     curl \
-    libglib2.0-0 \
+    libssl3 \
+    libffi8 \
+    libxml2 \
+    libxslt1 \
+    libblas3 \
+    liblapack3 \
+    libopenblas0 \
     libsm6 \
     libxext6 \
-    libxrender-dev \
+    libxrender1 \
     libgomp1 \
-    libglib2.0-dev \
-    libgirepository1.0-dev \
-    libcairo2-dev \
-    libxml2-dev \
-    libxslt1-dev \
-    libffi-dev \
-    libssl-dev \
-    libblas-dev \
-    liblapack-dev \
-    libportaudio2 \
+    libglib2.0-0 \
+    libcairo2 \
     poppler-utils \
     tesseract-ocr \
     ghostscript \
-    libmagic1 \
-    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-installed Python packages from builder
@@ -75,6 +95,7 @@ COPY --from=builder /root/.local /root/.local
 
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
+ENV PYTHONPATH=/root/.local/lib/python3.11/site-packages:$PYTHONPATH
 
 # Copy application code
 COPY src/ ./src/
