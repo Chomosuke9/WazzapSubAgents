@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import tool
 
 from src.config import config
 from src.container_client import ContainerClient
@@ -20,6 +19,117 @@ LLM_RETRY_MAX = int(os.getenv("AGENT_LLM_RETRY_MAX", "5"))
 LLM_RETRY_BASE_BACKOFF = float(os.getenv("AGENT_LLM_RETRY_BASE_BACKOFF", "2.0"))
 LLM_RETRY_MAX_BACKOFF = float(os.getenv("AGENT_LLM_RETRY_MAX_BACKOFF", "60.0"))
 STUCK_LOOP_THRESHOLD = int(os.getenv("AGENT_STUCK_LOOP_THRESHOLD", "5"))
+# How many times to re-invoke the LLM at the same turn when it returns plain
+# text (no native tool_call). Prevents infinite loops on a misconfigured model.
+NO_TOOL_RETRY_MAX = int(os.getenv("AGENT_NO_TOOL_RETRY_MAX", "3"))
+
+
+# Tool schemas — passed to ``ChatOpenAI.bind_tools`` so the model emits
+# native ``tool_calls`` instead of having to embed JSON in plain text.
+# A ``reason`` field is required on every tool so the progress webhook can
+# surface *why* the agent ran each step, which is what shows up in the
+# bridge's "Active sub-agent task" context block on subsequent LLM2 turns.
+BASH_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": (
+            "Execute a bash shell command inside the executor sidecar. "
+            "Use this for file operations, installations, and running "
+            "external programs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Short explanation (1 sentence) of WHY you are "
+                        "running this command, e.g. 'Mengekstrak zip yang "
+                        "diterima'. Surfaced as a progress update to the "
+                        "bridge."
+                    ),
+                    "minLength": 1,
+                },
+                "command": {
+                    "type": "string",
+                    "description": "The bash command to execute.",
+                    "minLength": 1,
+                },
+            },
+            "required": ["reason", "command"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+PYTHON_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "python",
+        "description": (
+            "Execute Python code inside the executor sidecar. "
+            "Use this for data processing, parsing, and calculations."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Short explanation (1 sentence) of WHY you are "
+                        "running this code, e.g. 'Parsing PDF jadi JSON'. "
+                        "Surfaced as a progress update to the bridge."
+                    ),
+                    "minLength": 1,
+                },
+                "code": {
+                    "type": "string",
+                    "description": "The Python source code to execute.",
+                    "minLength": 1,
+                },
+            },
+            "required": ["reason", "code"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+END_TASK_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "end_task",
+        "description": (
+            "Finish the task and report results back to the caller. Call "
+            "this exactly once when the instruction is fully resolved or "
+            "cannot be completed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "description": "True if the task was completed successfully.",
+                },
+                "report": {
+                    "type": "string",
+                    "description": (
+                        "Final report for the caller. Be concise but "
+                        "include any information the user will need."
+                    ),
+                },
+            },
+            "required": ["success", "report"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    BASH_TOOL_SCHEMA,
+    PYTHON_TOOL_SCHEMA,
+    END_TASK_TOOL_SCHEMA,
+]
 
 
 def _is_retryable_llm_error(err: BaseException) -> bool:
@@ -66,22 +176,25 @@ class ExecutorAgent:
         self.container_client = container_client
         self.session_manager = session_manager
         self.logger = logger_override or logger
-        self.llm = ChatOpenAI(
+        base_llm = ChatOpenAI(
             model=config["agent_model"],
             temperature=config["agent_temperature"],
             api_key=config["llm_api_key"],
             **({"base_url": config["llm_base_url"]} if config["llm_base_url"] else {}),
         )
-        self.tools = {
-            "bash": self._bash_tool,
-            "python": self._python_tool,
-            "end_task": self._end_task_tool,
-        }
+        # Bind the tool schemas once so every invocation reuses the same
+        # ``Runnable`` and the model is forced to emit native ``tool_calls``
+        # instead of JSON-in-content.
+        self.llm = base_llm.bind_tools(TOOL_SCHEMAS)
 
-    def _bash_tool(self, command: str, session_id: str) -> str:
+    # ------------------------------------------------------------------
+    # Tool implementations
+    # ------------------------------------------------------------------
+    def _bash_tool(self, reason: str, command: str, session_id: str) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "bash",
-            "detail": str({"command": command})[:500],
+            "reason": (reason or "")[:500],
+            "detail": str({"reason": reason, "command": command})[:500],
             "timestamp": time.time(),
         })
         result = self.container_client.run_bash(command, session_id=session_id)
@@ -89,6 +202,7 @@ class ExecutorAgent:
             "bash_tool executed",
             extra={
                 "session_id": session_id,
+                "reason": (reason or "")[:200],
                 "command": command[:200],
                 "returncode": result.get("returncode"),
             },
@@ -96,14 +210,22 @@ class ExecutorAgent:
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 
-    def _python_tool(self, code: str, session_id: str) -> str:
+    def _python_tool(self, reason: str, code: str, session_id: str) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "python",
-            "detail": str({"code": code})[:500],
+            "reason": (reason or "")[:500],
+            "detail": str({"reason": reason, "code": code})[:500],
             "timestamp": time.time(),
         })
         result = self.container_client.run_python(code, session_id=session_id)
-        self.logger.info("python_tool executed", extra={"session_id": session_id, "code": code[:200]})
+        self.logger.info(
+            "python_tool executed",
+            extra={
+                "session_id": session_id,
+                "reason": (reason or "")[:200],
+                "code": code[:200],
+            },
+        )
         if "error" in result:
             return f"ERROR:\n{result['error']}"
         return f"OUTPUT:\n{result.get('output', '')}"
@@ -112,6 +234,32 @@ class ExecutorAgent:
         self.logger.info("end_task_tool called", extra={"session_id": session_id, "success": success})
         return {"success": success, "report": report}
 
+    def _dispatch_tool(self, tool_name: str, arguments: Dict[str, Any], session_id: str) -> Any:
+        """Run the named tool with ``arguments``. Raises ``KeyError`` for
+        unknown tools so the caller can decide how to recover."""
+        if tool_name == "bash":
+            return self._bash_tool(
+                reason=arguments.get("reason", ""),
+                command=arguments.get("command", ""),
+                session_id=session_id,
+            )
+        if tool_name == "python":
+            return self._python_tool(
+                reason=arguments.get("reason", ""),
+                code=arguments.get("code", ""),
+                session_id=session_id,
+            )
+        if tool_name == "end_task":
+            return self._end_task_tool(
+                success=bool(arguments.get("success", False)),
+                report=str(arguments.get("report", "") or ""),
+                session_id=session_id,
+            )
+        raise KeyError(tool_name)
+
+    # ------------------------------------------------------------------
+    # Output collection / prompt construction
+    # ------------------------------------------------------------------
     def _collect_output_files(self, workdir: str) -> List[str]:
         # ``<workdir>/.inputs/`` is where ``stage_inputs_into_workdir`` places
         # caller-supplied input files so they are reachable inside the executor
@@ -133,12 +281,18 @@ class ExecutorAgent:
     def _build_system_prompt(self, instruction: str, input_files: List[str], workdir: str) -> str:
         files_str = "\n".join(input_files) if input_files else "None"
         return (
-            "You are an executor agent. Your job is to fulfill the user's instruction.\n"
-            "You have access to the following tools:\n"
-            "1. bash(command: str) - Execute a bash shell command.\n"
-            "2. python(code: str) - Execute Python code.\n"
-            "3. end_task(success: bool, report: str) - Finish the task and report results.\n\n"
+            "You are an executor agent. Your job is to fulfill the user's "
+            "instruction by calling the provided tools.\n\n"
+            "Tools available (call exactly one per turn — never reply with "
+            "plain text, always invoke a tool):\n"
+            "1. bash(reason, command) — run a bash command.\n"
+            "2. python(reason, code) — run Python code.\n"
+            "3. end_task(success, report) — finish the task with a final report.\n\n"
             "Rules:\n"
+            "- The `reason` argument is REQUIRED on `bash` and `python`. Keep "
+            "  it short (one sentence) and explain WHY you are running this "
+            "  step. It is shown back to the orchestrating agent as a "
+            "  progress update.\n"
             "- Use bash for file operations, installations, running external programs.\n"
             "- Use python for data processing, parsing, calculations.\n"
             "- If a tool returns an error, decide whether to retry, pivot, or fail.\n"
@@ -149,68 +303,61 @@ class ExecutorAgent:
             "alternative locations and do NOT invent new paths.\n"
             "- Write output files anywhere inside the workdir EXCEPT the "
             "`.inputs/` subdirectory (those are caller-supplied inputs and "
-            "will be filtered out of the result).\n\n"
+            "will be filtered out of the result).\n"
+            "- When the instruction is fully resolved (or cannot be done), "
+            "call `end_task` exactly once and stop.\n\n"
             f"Workdir: {workdir}\n"
             f"Input files:\n{files_str}\n\n"
-            f"Instruction: {instruction}\n\n"
-            "Respond with a single JSON object containing 'tool' and 'arguments'.\n"
-            'Example: {"tool": "bash", "arguments": {"command": "ls -la"}}\n'
-            'Example: {"tool": "end_task", "arguments": {"success": true, "report": "Done"}}'
+            f"Instruction: {instruction}"
         )
 
-    def _parse_tool_call(self, content: str) -> Optional[Dict[str, Any]]:
-        # Try to extract JSON from the response
-        content = content.strip()
-        # Handle markdown code blocks
-        if content.startswith("```"):
-            lines = content.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            content = "\n".join(lines).strip()
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return None
-
-    def _extract_tool_call(self, response: Any) -> Optional[Dict[str, Any]]:
-        """Pick a tool call from the LLM response.
-
-        Prefer native ``tool_calls`` produced by LangChain when the provider
-        supports OpenAI-style function calling; fall back to JSON-in-content
-        for providers / models that only emit raw text.
-        """
-        tool_calls = getattr(response, "tool_calls", None)
-        if isinstance(tool_calls, list) and tool_calls:
-            first = tool_calls[0]
-            name = None
+    # ------------------------------------------------------------------
+    # Tool-call extraction
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_tool_calls(response: Any) -> List[Dict[str, Any]]:
+        """Return a list of ``{name, args, id}`` dicts from a LangChain
+        response, normalising across both the dict and object forms used
+        by different LangChain versions."""
+        raw = getattr(response, "tool_calls", None)
+        if not isinstance(raw, list) or not raw:
+            return []
+        normalised: List[Dict[str, Any]] = []
+        for tc in raw:
+            name: Optional[str] = None
             args: Any = None
-            if isinstance(first, dict):
-                name = first.get("name") or (first.get("function") or {}).get("name")
-                args = first.get("args")
+            tc_id: Optional[str] = None
+            if isinstance(tc, dict):
+                name = tc.get("name") or (tc.get("function") or {}).get("name")
+                args = tc.get("args")
                 if args is None:
-                    raw_args = (first.get("function") or {}).get("arguments")
+                    raw_args = (tc.get("function") or {}).get("arguments")
                     if isinstance(raw_args, str):
                         try:
                             args = json.loads(raw_args)
                         except json.JSONDecodeError:
-                            args = None
+                            args = {}
                     elif isinstance(raw_args, dict):
                         args = raw_args
+                tc_id = tc.get("id") or tc.get("tool_call_id")
             else:
-                name = getattr(first, "name", None)
-                args = getattr(first, "args", None)
-            if name:
-                return {"tool": name, "arguments": args or {}}
+                name = getattr(tc, "name", None)
+                args = getattr(tc, "args", None)
+                tc_id = getattr(tc, "id", None) or getattr(tc, "tool_call_id", None)
+            if not name:
+                continue
+            if not isinstance(args, dict):
+                args = {}
+            if not tc_id:
+                # Some providers do not echo an id for every call; synthesise
+                # one so we can still build a matching ``ToolMessage``.
+                tc_id = f"call_{len(normalised)}_{int(time.time() * 1000)}"
+            normalised.append({"name": name, "args": args, "id": tc_id})
+        return normalised
 
-        content = getattr(response, "content", None)
-        if isinstance(content, list):
-            content = "\n".join(str(c) for c in content)
-        if not isinstance(content, str):
-            return None
-        return self._parse_tool_call(content)
-
+    # ------------------------------------------------------------------
+    # LLM invocation with retry on transient errors
+    # ------------------------------------------------------------------
     def _invoke_llm_with_retry(self, messages: List[Any], session_id: str) -> Any:
         """Call the LLM with bounded retries for transient errors.
 
@@ -262,6 +409,55 @@ class ExecutorAgent:
             raise last_err
         raise RuntimeError("LLM invoke loop terminated without a result")
 
+    def _invoke_until_tool_call(
+        self,
+        messages: List[Any],
+        session_id: str,
+        iteration: int,
+    ) -> tuple[Any, List[Dict[str, Any]]]:
+        """Invoke the LLM, retrying *at the same turn* when the response
+        contains no native ``tool_calls``.
+
+        We deliberately do NOT append the bad ``AIMessage`` to ``messages``
+        between retries — the goal is to give the model a fresh attempt
+        from the exact same point rather than letting it see (and double
+        down on) its own earlier non-tool reply.
+        """
+        attempts = max(1, NO_TOOL_RETRY_MAX + 1)
+        last_response: Any = None
+        for attempt in range(1, attempts + 1):
+            response = self._invoke_llm_with_retry(messages, session_id=session_id)
+            tool_calls = self._normalize_tool_calls(response)
+            last_response = response
+            if tool_calls:
+                if attempt > 1:
+                    self.logger.info(
+                        "LLM produced a tool_call after no-tool retry",
+                        extra={
+                            "session_id": session_id,
+                            "iteration": iteration,
+                            "attempt": attempt,
+                        },
+                    )
+                return response, tool_calls
+            content = response.content
+            if isinstance(content, list):
+                content = "\n".join(str(c) for c in content)
+            self.logger.warning(
+                "LLM returned no tool_call; retrying same turn",
+                extra={
+                    "session_id": session_id,
+                    "iteration": iteration,
+                    "attempt": attempt,
+                    "attempts": attempts,
+                    "content_preview": str(content)[:300],
+                },
+            )
+        return last_response, []
+
+    # ------------------------------------------------------------------
+    # Main agent loop
+    # ------------------------------------------------------------------
     def execute(
         self,
         session_id: str,
@@ -272,8 +468,9 @@ class ExecutorAgent:
         start_time = time.time()
         self.logger.info("Agent loop starting", extra={"session_id": session_id})
 
-        messages = [
+        messages: List[Any] = [
             SystemMessage(content=self._build_system_prompt(instruction, input_files, workdir)),
+            HumanMessage(content="Begin executing the instruction."),
         ]
 
         max_iterations = 50
@@ -283,79 +480,121 @@ class ExecutorAgent:
 
         for i in range(max_iterations):
             try:
-                response = self._invoke_llm_with_retry(messages, session_id=session_id)
+                response, tool_calls = self._invoke_until_tool_call(
+                    messages,
+                    session_id=session_id,
+                    iteration=i,
+                )
             except Exception as err:  # pylint: disable=broad-except
                 final_result = {
                     "success": False,
                     "report": f"LLM invocation failed after retries: {err}",
                 }
                 break
-            content = response.content
+
+            content = getattr(response, "content", "")
             if isinstance(content, list):
                 content = "\n".join(str(c) for c in content)
-            self.logger.info("LLM response", extra={"session_id": session_id, "iteration": i, "content": str(content)[:500]})
+            self.logger.info(
+                "LLM response",
+                extra={
+                    "session_id": session_id,
+                    "iteration": i,
+                    "tool_calls": len(tool_calls),
+                    "content_preview": str(content)[:300],
+                },
+            )
 
-            tool_call = self._extract_tool_call(response)
-            if not tool_call:
-                # If LLM didn't return valid JSON, ask it to try again
-                messages.append(AIMessage(content=content))
-                messages.append(
-                    HumanMessage(
-                        content="Invalid format. Please respond with a single JSON object containing 'tool' and 'arguments'."
-                    )
-                )
-                continue
-
-            tool_name = tool_call.get("tool")
-            arguments = tool_call.get("arguments", {}) or {}
-
-            if tool_name not in self.tools:
-                messages.append(AIMessage(content=content))
-                messages.append(HumanMessage(content=f"Tool '{tool_name}' not available. Use bash, python, or end_task."))
-                continue
-
-            if tool_name == "end_task":
-                final_result = self.tools[tool_name](**arguments, session_id=session_id)
-                break
-
-            # Track repeated identical tool calls so we can break out of obvious loops.
-            try:
-                signature = json.dumps({"tool": tool_name, "arguments": arguments}, sort_keys=True, default=str)
-            except Exception:
-                signature = f"{tool_name}:{arguments}"
-            if signature == last_signature:
-                repeat_count += 1
-            else:
-                repeat_count = 1
-                last_signature = signature
-            if STUCK_LOOP_THRESHOLD > 0 and repeat_count >= STUCK_LOOP_THRESHOLD:
-                self.logger.warning(
-                    "Agent appears stuck repeating the same tool call",
-                    extra={
-                        "session_id": session_id,
-                        "iteration": i,
-                        "tool": tool_name,
-                        "repeat_count": repeat_count,
-                    },
-                )
+            if not tool_calls:
+                # All retries at this turn produced plain text — give up
+                # rather than spin in an infinite loop.
                 final_result = {
                     "success": False,
                     "report": (
-                        f"Agent appeared stuck: same {tool_name} call repeated "
-                        f"{repeat_count} times in a row without progress."
+                        "Agent failed to emit a native tool_call after "
+                        f"{NO_TOOL_RETRY_MAX} retries at turn {i}."
                     ),
                 }
                 break
 
-            # Execute bash or python
-            try:
-                result = self.tools[tool_name](**arguments, session_id=session_id)
-            except Exception as e:
-                result = f"ERROR executing {tool_name}: {str(e)}"
-                self.logger.error("Tool execution failed", extra={"session_id": session_id, "tool": tool_name, "error": str(e)})
+            # Append the AIMessage carrying the tool_calls so the next turn
+            # is a valid OpenAI tool-calling history (AIMessage with
+            # tool_calls → ToolMessages with matching ids).
+            messages.append(response)
 
-            messages.append(AIMessage(content=content))
-            messages.append(HumanMessage(content=f"Result of {tool_name}:\n{result}"))
+            # We process tool calls sequentially; if the model emits more
+            # than one in a single turn we still execute them all and feed
+            # results back as separate ``ToolMessage`` entries before the
+            # next LLM invocation.
+            end_task_called = False
+            for tc in tool_calls:
+                tool_name = tc["name"]
+                arguments = tc["args"] or {}
+                tc_id = tc["id"]
+
+                if tool_name == "end_task":
+                    final_result = self._dispatch_tool(tool_name, arguments, session_id=session_id)
+                    end_task_called = True
+                    break
+
+                if tool_name not in {"bash", "python"}:
+                    messages.append(ToolMessage(
+                        content=f"Tool '{tool_name}' is not available. Use bash, python, or end_task.",
+                        tool_call_id=tc_id,
+                    ))
+                    continue
+
+                # Track repeated identical tool calls so we can break out
+                # of obvious loops (same command/code with same reason).
+                try:
+                    signature = json.dumps(
+                        {"tool": tool_name, "arguments": arguments},
+                        sort_keys=True,
+                        default=str,
+                    )
+                except Exception:
+                    signature = f"{tool_name}:{arguments}"
+                if signature == last_signature:
+                    repeat_count += 1
+                else:
+                    repeat_count = 1
+                    last_signature = signature
+                if STUCK_LOOP_THRESHOLD > 0 and repeat_count >= STUCK_LOOP_THRESHOLD:
+                    self.logger.warning(
+                        "Agent appears stuck repeating the same tool call",
+                        extra={
+                            "session_id": session_id,
+                            "iteration": i,
+                            "tool": tool_name,
+                            "repeat_count": repeat_count,
+                        },
+                    )
+                    final_result = {
+                        "success": False,
+                        "report": (
+                            f"Agent appeared stuck: same {tool_name} call repeated "
+                            f"{repeat_count} times in a row without progress."
+                        ),
+                    }
+                    end_task_called = True  # break outer loop
+                    break
+
+                try:
+                    result = self._dispatch_tool(tool_name, arguments, session_id=session_id)
+                except Exception as e:  # pylint: disable=broad-except
+                    result = f"ERROR executing {tool_name}: {str(e)}"
+                    self.logger.error(
+                        "Tool execution failed",
+                        extra={"session_id": session_id, "tool": tool_name, "error": str(e)},
+                    )
+
+                messages.append(ToolMessage(
+                    content=str(result),
+                    tool_call_id=tc_id,
+                ))
+
+            if end_task_called:
+                break
 
         if final_result is None:
             final_result = {"success": False, "report": "Agent reached max iterations without calling end_task."}
