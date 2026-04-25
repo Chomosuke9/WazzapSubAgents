@@ -76,24 +76,34 @@ class DockerManager:
             except docker.errors.NotFound:
                 pass
 
-            # The sidecar container must mount the same shared exchange
-            # directory used by the main service so bash/python tools can
-            # read input_files staged by WazzapAgents and write output_files
-            # back to a path WazzapAgents can read.
+            # Native mode: the bridge writes to the same `WORKDIR_BASE`
+            # path the executor sidecar reads from, so we MUST bind-mount
+            # `WORKDIR_BASE` host→container at the identical path.
+            # Otherwise:
+            #   - SessionManager creates dirs at /tmp/work/<id> on the host,
+            #   - the executor sidecar runs bash with cwd /tmp/work/<id>
+            #     inside the container,
+            # and unless those map to the same on-disk dir, output files
+            # end up in the wrong place and `_collect_output_files()`
+            # finds nothing.
             #
-            # WORKDIR_BASE must live inside that shared mount so that paths
-            # collected by SessionManager are reachable from outside the
-            # container. Defaults match the docker-compose contract:
-            #   /storage  → shared exchange dir (host ↔ container)
-            #   /storage/subagent_work → WORKDIR_BASE
+            # Defaults are kept at `/tmp/work` to match `SessionManager`
+            # and preserve the native flow that worked before. The shared
+            # `/storage` mount is added on top so input_files staged by
+            # WazzapAgents under /storage/subagent_in/<id>/ are readable.
+            workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
             storage_dir_host = os.getenv("SUBAGENT_STORAGE_DIR", "/storage")
             storage_dir_container = "/storage"
-            workdir_base = os.getenv("WORKDIR_BASE", f"{storage_dir_container}/subagent_work")
 
             volumes = {
                 "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},
-                storage_dir_host: {"bind": storage_dir_container, "mode": "rw"},
+                workdir_base: {"bind": workdir_base, "mode": "rw"},
             }
+            # Only mount /storage if it actually exists on the host —
+            # otherwise Docker happily creates an empty directory at the
+            # host path which is rarely what the operator wanted.
+            if os.path.isdir(storage_dir_host) and storage_dir_host != workdir_base:
+                volumes[storage_dir_host] = {"bind": storage_dir_container, "mode": "rw"}
 
             self.client.containers.run(
                 self.image_name,
@@ -113,7 +123,7 @@ class DockerManager:
                 extra={
                     "container": self.container_name,
                     "workdir_base": workdir_base,
-                    "storage_mount": f"{storage_dir_host}->{storage_dir_container}",
+                    "volumes": list(volumes.keys()),
                 },
             )
         except APIError as e:
