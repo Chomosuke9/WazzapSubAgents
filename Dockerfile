@@ -1,5 +1,5 @@
 # Stage 1: Build (install dependencies once)
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 WORKDIR /app
 
 # Install system deps required for building Python packages
@@ -75,7 +75,7 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     libffi8 \
     libxml2 \
-    libxslt1 \
+    libxslt1.1 \
     libblas3 \
     liblapack3 \
     libopenblas0 \
@@ -95,7 +95,6 @@ COPY --from=builder /root/.local /root/.local
 
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
-ENV PYTHONPATH=/root/.local/lib/python3.11/site-packages:$PYTHONPATH
 
 # Copy application code
 COPY src/ ./src/
