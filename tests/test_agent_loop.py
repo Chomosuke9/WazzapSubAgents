@@ -26,7 +26,7 @@ def test_parse_tool_call_invalid():
     assert agent._parse_tool_call("not json") is None
 
 
-@patch("src.agent.ChatAnthropic")
+@patch("src.agent.ChatOpenAI")
 def test_execute_ends_on_end_task(mock_llm_class):
     client = MagicMock()
     sm = MagicMock()
@@ -49,7 +49,7 @@ def test_execute_ends_on_end_task(mock_llm_class):
     sm.append_progress.assert_called_once()
 
 
-@patch("src.agent.ChatAnthropic")
+@patch("src.agent.ChatOpenAI")
 def test_execute_max_iterations(mock_llm_class):
     client = MagicMock()
     sm = MagicMock()

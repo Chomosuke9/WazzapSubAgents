@@ -3,7 +3,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
@@ -20,11 +20,12 @@ class ExecutorAgent:
         self.container_client = container_client
         self.session_manager = session_manager
         self.logger = logger_override or logger
-        self.llm = ChatAnthropic(
+        self.llm = ChatOpenAI(
             model=config["agent_model"],
             temperature=config["agent_temperature"],
             max_tokens=config["agent_max_tokens"],
-            anthropic_api_key=config["llm_api_key"],
+            api_key=config["llm_api_key"],
+            **({"base_url": config["llm_base_url"]} if config["llm_base_url"] else {}),
         )
         self.tools = {
             "bash": self._bash_tool,

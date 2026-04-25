@@ -12,6 +12,7 @@ if not AGENT_MODEL:
     raise ValueError("AGENT_MODEL must be set in .env")
 
 # Optional with defaults
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")  # e.g. https://api.anthropic.com or custom proxy
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.7"))
 AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "4096"))
 SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "600"))
@@ -21,6 +22,7 @@ CONTAINER_EXECUTOR_URL = os.getenv("CONTAINER_EXECUTOR_URL", "http://localhost:5
 
 config = {
     "llm_api_key": LLM_API_KEY,
+    "llm_base_url": LLM_BASE_URL,
     "agent_model": AGENT_MODEL,
     "agent_temperature": AGENT_TEMPERATURE,
     "agent_max_tokens": AGENT_MAX_TOKENS,
