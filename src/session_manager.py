@@ -46,13 +46,28 @@ class SessionManager:
             # can read the resulting files.
             workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
             # `session_id` is taken straight from the HTTP request body
-            # (src/app.py); `os.path.join` would silently drop
-            # ``workdir_base`` if the caller passed an absolute path
-            # (e.g. ``/etc``), which `cleanup_session` would then happily
-            # ``shutil.rmtree`` on. Strip leading separators so the joined
-            # path always stays inside ``workdir_base``.
+            # (src/app.py) with no content validation, and
+            # `cleanup_session` later runs `shutil.rmtree(session.workdir)`.
+            # Without sanitization a caller could pass:
+            #   - ``"/etc"``       → `os.path.join` discards `workdir_base`
+            #     and rmtree's `/etc`.
+            #   - ``"../../etc"``  → `realpath` resolves outside
+            #     `workdir_base` and rmtree's that target instead.
+            # Strip leading separators, resolve to an absolute path, and
+            # require the result to live strictly inside `workdir_base`.
             safe_session_id = session_id.lstrip(os.sep)
-            workdir = os.path.join(workdir_base, safe_session_id)
+            real_base = os.path.realpath(workdir_base)
+            workdir = os.path.realpath(os.path.join(real_base, safe_session_id))
+            if workdir != real_base and not workdir.startswith(real_base + os.sep):
+                raise ValueError(
+                    f"Invalid session_id {session_id!r}: resolves outside workdir_base"
+                )
+            if workdir == real_base:
+                # An empty / dot-only session_id would alias the base dir;
+                # cleanup would then delete the whole workdir tree.
+                raise ValueError(
+                    f"Invalid session_id {session_id!r}: must not be empty"
+                )
             os.makedirs(workdir, exist_ok=True)
             session = Session(session_id=session_id, workdir=workdir)
             self._sessions[session_id] = session
