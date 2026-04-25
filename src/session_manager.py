@@ -45,7 +45,14 @@ class SessionManager:
             # docker-compose overrides it to a host-shared path so WazzapAgents
             # can read the resulting files.
             workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
-            workdir = os.path.join(workdir_base, session_id)
+            # `session_id` is taken straight from the HTTP request body
+            # (src/app.py); `os.path.join` would silently drop
+            # ``workdir_base`` if the caller passed an absolute path
+            # (e.g. ``/etc``), which `cleanup_session` would then happily
+            # ``shutil.rmtree`` on. Strip leading separators so the joined
+            # path always stays inside ``workdir_base``.
+            safe_session_id = session_id.lstrip(os.sep)
+            workdir = os.path.join(workdir_base, safe_session_id)
             os.makedirs(workdir, exist_ok=True)
             session = Session(session_id=session_id, workdir=workdir)
             self._sessions[session_id] = session
