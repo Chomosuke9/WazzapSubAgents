@@ -198,6 +198,38 @@ Idle timeout reached  -->  Result deleted + workdir cleaned
 | `CONTAINER_EXECUTOR_URL` | No | `http://localhost:5001` | In-container executor URL |
 | `SESSION_IDLE_TIMEOUT` | No | 600 | Session result idle timeout (seconds) |
 | `LOG_LEVEL` | No | INFO | Logging level |
+| `WORKDIR_BASE` | No | `/tmp/work` (native) / `/storage/subagent_work` (compose) | Base directory for per-session workdirs. Must be on a filesystem the bridge can read so it can pick up `output_files`. |
+| `SUBAGENT_STORAGE_DIR` | No | `/storage` | Host directory bind-mounted to `/storage` inside both containers. Used as the cross-process exchange for input/output files. |
+| `SUBAGENT_WORKDIR_BASE` | No | `/storage/subagent_work` | docker-compose-only override of `WORKDIR_BASE` keeping it inside the shared mount. |
+
+---
+
+## File Sharing Contract (cross-process)
+
+WazzapAgents passes **absolute file paths** in `input_files` and reads back
+**absolute file paths** from `output_files`. Both processes therefore need
+to agree on a directory that exists on the host *and* is mounted inside
+this service's containers — otherwise:
+
+- `input_files` paths handed to the agent will be missing inside the
+  executor sidecar (bash/python can't read them), or
+- `output_files` paths returned to the bridge will not exist on its side
+  (it can't stage them as WhatsApp media).
+
+The default contract used by `docker-compose.yml`:
+
+| Concern | Host path | Container path |
+|---------|-----------|----------------|
+| Input staging by WazzapAgents | `/storage/subagent_in/<session_id>/` | same |
+| Per-session workdir / outputs | `/storage/subagent_work/<session_id>/` | same |
+
+The directories are unified under `/storage` (override via
+`SUBAGENT_STORAGE_DIR` on the host side and the matching env on the
+WazzapAgents side). The `executor-service` and `executor-executor`
+containers both bind-mount the same host directory so paths are
+identical inside and out, and `host.docker.internal` is wired in via
+`extra_hosts` so the agent can POST `complete`/`progress` callbacks to
+the bridge running on the host.
 
 ---
 

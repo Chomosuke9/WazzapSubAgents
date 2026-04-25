@@ -1,6 +1,7 @@
+import os
 import subprocess
-import time
 import sys
+import time
 from typing import Optional
 
 import docker
@@ -75,20 +76,46 @@ class DockerManager:
             except docker.errors.NotFound:
                 pass
 
+            # The sidecar container must mount the same shared exchange
+            # directory used by the main service so bash/python tools can
+            # read input_files staged by WazzapAgents and write output_files
+            # back to a path WazzapAgents can read.
+            #
+            # WORKDIR_BASE must live inside that shared mount so that paths
+            # collected by SessionManager are reachable from outside the
+            # container. Defaults match the docker-compose contract:
+            #   /storage  → shared exchange dir (host ↔ container)
+            #   /storage/subagent_work → WORKDIR_BASE
+            storage_dir_host = os.getenv("SUBAGENT_STORAGE_DIR", "/storage")
+            storage_dir_container = "/storage"
+            workdir_base = os.getenv("WORKDIR_BASE", f"{storage_dir_container}/subagent_work")
+
+            volumes = {
+                "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},
+                storage_dir_host: {"bind": storage_dir_container, "mode": "rw"},
+            }
+
             self.client.containers.run(
                 self.image_name,
                 name=self.container_name,
                 command=["python", "-m", "src.executor_server"],
                 detach=True,
                 ports={f"{self.container_port}/tcp": self.container_port},
-                environment={"FLASK_PORT": str(self.container_port), "WORKDIR_BASE": "/tmp/work"},
-                volumes={
-                    "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},
-                    "/tmp/work": {"bind": "/tmp/work", "mode": "rw"},
+                environment={
+                    "FLASK_PORT": str(self.container_port),
+                    "WORKDIR_BASE": workdir_base,
                 },
+                volumes=volumes,
                 network_mode="bridge",
             )
-            logger.info("Container started", extra={"container": self.container_name})
+            logger.info(
+                "Container started",
+                extra={
+                    "container": self.container_name,
+                    "workdir_base": workdir_base,
+                    "storage_mount": f"{storage_dir_host}->{storage_dir_container}",
+                },
+            )
         except APIError as e:
             logger.error("Failed to start container", extra={"error": str(e)})
             raise

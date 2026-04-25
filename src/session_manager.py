@@ -39,7 +39,13 @@ class SessionManager:
                 session = self._sessions[session_id]
                 session.last_activity = time.time()
                 return session
-            workdir = f"/tmp/work/{session_id}"
+            # WORKDIR_BASE must match the executor sidecar so files written by
+            # bash/python tools land in the same place we collect output_files
+            # from. Defaults to /tmp/work for backwards compatibility, but
+            # docker-compose overrides it to a host-shared path so WazzapAgents
+            # can read the resulting files.
+            workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
+            workdir = os.path.join(workdir_base, session_id)
             os.makedirs(workdir, exist_ok=True)
             session = Session(session_id=session_id, workdir=workdir)
             self._sessions[session_id] = session
