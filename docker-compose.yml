@@ -29,7 +29,6 @@ services:
       LLM_API_KEY: ${LLM_API_KEY}
       AGENT_MODEL: ${AGENT_MODEL}
       AGENT_TEMPERATURE: ${AGENT_TEMPERATURE:-0.7}
-      AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-4096}
       # Sessions store their workdir under WORKDIR_BASE. Keep this in sync
       # with the executor-executor sidecar so bash/python tool output lands
       # in the same place we collect output_files from.

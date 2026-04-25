@@ -193,7 +193,6 @@ Idle timeout reached  -->  Result deleted + workdir cleaned
 | `LLM_API_KEY` | Yes | — | LLM API key (e.g. Anthropic, OpenAI) |
 | `AGENT_MODEL` | Yes | — | Model name (e.g. `claude-3-5-sonnet`) |
 | `AGENT_TEMPERATURE` | No | 0.7 | Sampling temperature |
-| `AGENT_MAX_TOKENS` | No | 4096 | Max tokens per response |
 | `FLASK_PORT` | No | 5000 | Main service port |
 | `CONTAINER_EXECUTOR_URL` | No | `http://localhost:5001` | In-container executor URL |
 | `SESSION_IDLE_TIMEOUT` | No | 600 | Session result idle timeout (seconds) |

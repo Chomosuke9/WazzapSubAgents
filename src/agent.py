@@ -69,7 +69,6 @@ class ExecutorAgent:
         self.llm = ChatOpenAI(
             model=config["agent_model"],
             temperature=config["agent_temperature"],
-            max_tokens=config["agent_max_tokens"],
             api_key=config["llm_api_key"],
             **({"base_url": config["llm_base_url"]} if config["llm_base_url"] else {}),
         )
