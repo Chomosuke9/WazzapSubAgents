@@ -1,6 +1,7 @@
+import os
 import subprocess
-import time
 import sys
+import time
 from typing import Optional
 
 import docker
@@ -75,20 +76,56 @@ class DockerManager:
             except docker.errors.NotFound:
                 pass
 
+            # Native mode: the bridge writes to the same `WORKDIR_BASE`
+            # path the executor sidecar reads from, so we MUST bind-mount
+            # `WORKDIR_BASE` host→container at the identical path.
+            # Otherwise:
+            #   - SessionManager creates dirs at /tmp/work/<id> on the host,
+            #   - the executor sidecar runs bash with cwd /tmp/work/<id>
+            #     inside the container,
+            # and unless those map to the same on-disk dir, output files
+            # end up in the wrong place and `_collect_output_files()`
+            # finds nothing.
+            #
+            # Defaults are kept at `/tmp/work` to match `SessionManager`
+            # and preserve the native flow that worked before. The shared
+            # `/storage` mount is added on top so input_files staged by
+            # WazzapAgents under /storage/subagent_in/<id>/ are readable.
+            workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
+            storage_dir_host = os.getenv("SUBAGENT_STORAGE_DIR", "/storage")
+            storage_dir_container = "/storage"
+
+            volumes = {
+                "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},
+                workdir_base: {"bind": workdir_base, "mode": "rw"},
+            }
+            # Only mount /storage if it actually exists on the host —
+            # otherwise Docker happily creates an empty directory at the
+            # host path which is rarely what the operator wanted.
+            if os.path.isdir(storage_dir_host) and storage_dir_host != workdir_base:
+                volumes[storage_dir_host] = {"bind": storage_dir_container, "mode": "rw"}
+
             self.client.containers.run(
                 self.image_name,
                 name=self.container_name,
                 command=["python", "-m", "src.executor_server"],
                 detach=True,
                 ports={f"{self.container_port}/tcp": self.container_port},
-                environment={"FLASK_PORT": str(self.container_port), "WORKDIR_BASE": "/tmp/work"},
-                volumes={
-                    "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},
-                    "/tmp/work": {"bind": "/tmp/work", "mode": "rw"},
+                environment={
+                    "FLASK_PORT": str(self.container_port),
+                    "WORKDIR_BASE": workdir_base,
                 },
+                volumes=volumes,
                 network_mode="bridge",
             )
-            logger.info("Container started", extra={"container": self.container_name})
+            logger.info(
+                "Container started",
+                extra={
+                    "container": self.container_name,
+                    "workdir_base": workdir_base,
+                    "volumes": list(volumes.keys()),
+                },
+            )
         except APIError as e:
             logger.error("Failed to start container", extra={"error": str(e)})
             raise

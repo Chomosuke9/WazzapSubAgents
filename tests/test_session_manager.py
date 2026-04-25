@@ -49,3 +49,30 @@ def test_cleanup_thread():
     sm.store_result("sess_5", {"success": True})
     time.sleep(12)  # Wait for cleanup loop to run
     assert sm.get_result("sess_5") is None
+
+
+def test_rejects_traversal_session_id(tmp_path, monkeypatch):
+    # session_id is taken straight from the HTTP request body. ``..``
+    # traversal must not be allowed to escape WORKDIR_BASE — otherwise
+    # cleanup_session would shutil.rmtree an arbitrary directory.
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    sm = SessionManager()
+    import pytest
+    with pytest.raises(ValueError):
+        sm.get_or_create("../../etc")
+    with pytest.raises(ValueError):
+        sm.get_or_create("..")
+    with pytest.raises(ValueError):
+        sm.get_or_create(".")
+    with pytest.raises(ValueError):
+        sm.get_or_create("")
+
+
+def test_absolute_session_id_is_contained(tmp_path, monkeypatch):
+    # An absolute-looking session_id like ``/etc`` must NOT escape
+    # WORKDIR_BASE (the leading separator is stripped before joining).
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    sm = SessionManager()
+    s = sm.get_or_create("/etc")
+    assert s.workdir.startswith(str(tmp_path) + os.sep)
+    sm.cleanup_session("/etc")

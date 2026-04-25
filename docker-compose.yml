@@ -1,5 +1,18 @@
 version: "3.9"
 
+# Cross-process file sharing contract:
+#   WazzapAgents (the parent bridge) and this stack must share a directory
+#   on the host so that:
+#     - input_files paths passed to /execute resolve inside the container
+#     - output_files paths returned from /execute resolve on the host that
+#       runs WazzapAgents (so the bridge can stage them as WhatsApp media)
+#   The default is /storage on the host. Override via SUBAGENT_STORAGE_DIR
+#   if you need a different host path.
+#
+# WORKDIR_BASE must therefore live inside the shared mount; both the main
+# service and the in-container executor must agree on the same value, and
+# WazzapAgents must be able to read that path.
+
 services:
   executor-service:
     build:
@@ -17,10 +30,21 @@ services:
       AGENT_MODEL: ${AGENT_MODEL}
       AGENT_TEMPERATURE: ${AGENT_TEMPERATURE:-0.7}
       AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-4096}
+      # Sessions store their workdir under WORKDIR_BASE. Keep this in sync
+      # with the executor-executor sidecar so bash/python tool output lands
+      # in the same place we collect output_files from.
+      WORKDIR_BASE: ${SUBAGENT_WORKDIR_BASE:-/storage/subagent_work}
     volumes:
-      - /storage:/storage:ro  # Input files
-      - executor-work:/tmp/work
+      # Shared exchange directory: read-write so the bridge can stage
+      # input_files here and the agent can write output_files here.
+      - ${SUBAGENT_STORAGE_DIR:-/storage}:/storage:rw
       - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      # Lets the agent POST progress/complete callbacks back to the bridge
+      # running on the host (default SUBAGENT_WEBHOOK_URL points at
+      # host.docker.internal:8081). On Linux Docker this resolves the
+      # gateway IP; on Docker Desktop it is built-in.
+      - "host.docker.internal:host-gateway"
     networks:
       - executor-net
     restart: unless-stopped
@@ -37,10 +61,13 @@ services:
       - "5001:5001"
     environment:
       FLASK_PORT: "5001"
-      WORKDIR_BASE: /tmp/work
+      WORKDIR_BASE: ${SUBAGENT_WORKDIR_BASE:-/storage/subagent_work}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
-      - executor-work:/tmp/work
+      # Same shared mount as the main service so bash/python tools can
+      # read input_files staged by the bridge AND write outputs to a
+      # path the bridge can read after the task completes.
+      - ${SUBAGENT_STORAGE_DIR:-/storage}:/storage:rw
     networks:
       - executor-net
     restart: unless-stopped
@@ -49,10 +76,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-volumes:
-  executor-work:
-    driver: local
 
 networks:
   executor-net:
