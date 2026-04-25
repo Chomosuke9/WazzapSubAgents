@@ -478,7 +478,25 @@ class ExecutorAgent:
         last_err: Optional[BaseException] = None
         for attempt in range(1, attempts + 1):
             try:
-                return self.llm.invoke(messages)
+                self.logger.debug(
+                    "About to invoke LLM",
+                    extra={
+                        "session_id": session_id,
+                        "messages_count": len(messages),
+                        "last_message_role": messages[-1].get("role") if messages else None,
+                    },
+                )
+                response = self.llm.invoke(messages)
+                self.logger.info(
+                    "LLM response received",
+                    extra={
+                        "session_id": session_id,
+                        "response_type": type(response).__name__,
+                        "response_keys": list(response.keys()) if hasattr(response, "keys") else "N/A",
+                        "tool_calls": response.get("tool_calls") if hasattr(response, "get") else "N/A",
+                    },
+                )
+                return response
             except Exception as err:  # pylint: disable=broad-except
                 last_err = err
                 retryable = _is_retryable_llm_error(err)
