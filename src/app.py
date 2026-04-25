@@ -8,6 +8,7 @@ from src.agent import ExecutorAgent
 from src.config import config
 from src.container_client import ContainerClient
 from src.docker_manager import DockerManager
+from src.input_staging import stage_inputs_into_workdir
 from src.logger import get_logger
 from src.session_manager import SessionManager
 
@@ -49,6 +50,28 @@ def create_app(docker_mgr: DockerManager) -> Flask:
             )
             return jsonify({"success": False, "report": str(exc)}), 400
         session_manager.set_callback(session_id, callback_url, progress_webhook)
+
+        # Re-stage the caller's input files into ``<workdir>/.inputs/`` so the
+        # paths handed to the agent's bash/python tools are reachable from
+        # inside the executor sidecar. Without this, paths that live outside
+        # the container's bind-mounts (e.g. WazzapAgents' default
+        # ``<repo>/data/subagent_in/...``) appear as "file not found" and
+        # the sub-agent loops searching ``/tmp /home /workspace /mnt /var``
+        # before failing. ``workdir`` is rooted in ``WORKDIR_BASE`` which is
+        # bind-mounted at the same host/container path, so the copies are
+        # always visible inside the container.
+        if input_files:
+            staged_inputs = stage_inputs_into_workdir(session.workdir, input_files)
+            logger.info(
+                "Staged input files into workdir",
+                extra={
+                    "session_id": session_id,
+                    "workdir": session.workdir,
+                    "input_count": len(input_files),
+                    "staged_count": len(staged_inputs),
+                },
+            )
+            input_files = staged_inputs
 
         def run_agent():
             try:

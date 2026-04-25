@@ -113,11 +113,21 @@ class ExecutorAgent:
         return {"success": success, "report": report}
 
     def _collect_output_files(self, workdir: str) -> List[str]:
-        files = []
+        # ``<workdir>/.inputs/`` is where ``stage_inputs_into_workdir`` places
+        # caller-supplied input files so they are reachable inside the executor
+        # sidecar. Those bytes were *received*, not *produced*, so excluding the
+        # subtree prevents the bridge from echoing the same file back to the
+        # user as a fresh "output".
+        from src.input_staging import is_input_path
+
+        files: list[str] = []
         if os.path.isdir(workdir):
             for root, _, filenames in os.walk(workdir):
                 for f in filenames:
-                    files.append(os.path.join(root, f))
+                    candidate = os.path.join(root, f)
+                    if is_input_path(workdir, candidate):
+                        continue
+                    files.append(candidate)
         return files
 
     def _build_system_prompt(self, instruction: str, input_files: List[str], workdir: str) -> str:
@@ -133,8 +143,13 @@ class ExecutorAgent:
             "- Use python for data processing, parsing, calculations.\n"
             "- If a tool returns an error, decide whether to retry, pivot, or fail.\n"
             "- Do not ask the user questions. Decide and act.\n"
-            "- Input files are at the paths provided below.\n"
-            "- Write output files to the workdir if needed.\n\n"
+            "- Input files are at the EXACT paths provided below — they have "
+            "already been staged inside the workdir for you. Use those paths "
+            "verbatim in `bash`/`python`. Do NOT search the filesystem for "
+            "alternative locations and do NOT invent new paths.\n"
+            "- Write output files anywhere inside the workdir EXCEPT the "
+            "`.inputs/` subdirectory (those are caller-supplied inputs and "
+            "will be filtered out of the result).\n\n"
             f"Workdir: {workdir}\n"
             f"Input files:\n{files_str}\n\n"
             f"Instruction: {instruction}\n\n"

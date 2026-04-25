@@ -134,3 +134,35 @@ def test_execute_extracts_native_tool_calls(mock_llm_class):
     result = agent.execute("s4", "do something", [], "/tmp/work/s4")
     assert result["success"] is True
     assert result["report"] == "native"
+
+
+def test_collect_output_files_excludes_inputs_subdir(tmp_path):
+    """Files staged into ``<workdir>/.inputs/`` must NOT show up in
+    ``output_files`` — otherwise the bridge would echo every input back to
+    the user as a fresh output."""
+    from src.input_staging import INPUT_SUBDIR
+
+    workdir = tmp_path / "session-x"
+    workdir.mkdir()
+    # Outputs the agent "produced".
+    (workdir / "result.txt").write_text("real output")
+    nested = workdir / "subdir"
+    nested.mkdir()
+    (nested / "nested.bin").write_bytes(b"\x00\x01")
+    # Inputs that were staged in by the bridge.
+    inputs = workdir / INPUT_SUBDIR
+    inputs.mkdir()
+    (inputs / "user-doc.zip").write_bytes(b"input-bytes")
+    (inputs / "another.pdf").write_bytes(b"another")
+
+    client = MagicMock()
+    sm = MagicMock()
+    agent = ExecutorAgent(client, sm)
+
+    collected = agent._collect_output_files(str(workdir))
+    basenames = sorted(p.split("/")[-1] for p in collected)
+    assert "result.txt" in basenames
+    assert "nested.bin" in basenames
+    # The two input files must be filtered out.
+    assert "user-doc.zip" not in basenames
+    assert "another.pdf" not in basenames
