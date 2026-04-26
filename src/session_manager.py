@@ -113,6 +113,23 @@ class SessionManager:
                     }
                     self._fire_webhook(session.progress_webhook, payload)
 
+    def fire_queue_event(self, session_id: str, payload: dict) -> None:
+        """Fire an out-of-band queue-status webhook (``queued`` /
+        ``queue_advanced``) to the session's configured progress webhook.
+
+        This is used by :class:`src.concurrency.SubAgentQueue` to notify
+        the bridge (and ultimately the end user) about a session's
+        position in the global FIFO queue. Unlike :meth:`append_progress`
+        we do NOT touch ``progress_logs`` — queue state is external
+        scheduling information, not sub-agent progress.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session or not session.progress_webhook:
+                return
+            url = session.progress_webhook
+        self._fire_webhook(url, payload)
+
     def _fire_webhook(self, url: str, payload: dict) -> None:
         max_attempts = int(os.getenv("WEBHOOK_RETRY_MAX", "5"))
         base_backoff = float(os.getenv("WEBHOOK_RETRY_BASE_BACKOFF", "1.0"))

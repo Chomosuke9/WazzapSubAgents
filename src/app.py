@@ -5,6 +5,7 @@ from typing import Any, Dict
 from flask import Flask, request, jsonify
 
 from src.agent import ExecutorAgent
+from src.concurrency import SubAgentQueue, get_global_queue
 from src.config import config
 from src.container_client import ContainerClient
 from src.docker_manager import DockerManager
@@ -15,11 +16,18 @@ from src.session_manager import SessionManager
 logger = get_logger(__name__)
 
 
-def create_app(docker_mgr: DockerManager) -> Flask:
+def create_app(
+    docker_mgr: DockerManager,
+    queue: SubAgentQueue | None = None,
+) -> Flask:
     app = Flask(__name__)
     container_url = docker_mgr.get_container_url()
     container_client = ContainerClient(container_url)
     session_manager = SessionManager(idle_timeout=config["session_idle_timeout"])
+    # Global FIFO gate limiting concurrent agent executions (default 1).
+    # Tests may inject a dedicated queue to avoid leaking process-global
+    # state between cases.
+    subagent_queue = queue if queue is not None else get_global_queue()
 
     @app.get("/health")
     def health():
@@ -73,8 +81,46 @@ def create_app(docker_mgr: DockerManager) -> Flask:
             )
             input_files = staged_inputs
 
+        def _emit_queued(sid: str, position: int, queue_size: int) -> None:
+            session_manager.fire_queue_event(
+                sid,
+                {
+                    "type": "queued",
+                    "session_id": sid,
+                    "position": position,
+                    "queue_size": queue_size,
+                },
+            )
+            logger.info(
+                "Session queued",
+                extra={"session_id": sid, "position": position, "queue_size": queue_size},
+            )
+
+        def _emit_advance(updates: list[tuple[str, int, int]]) -> None:
+            for sid, position, queue_size in updates:
+                session_manager.fire_queue_event(
+                    sid,
+                    {
+                        "type": "queue_advanced",
+                        "session_id": sid,
+                        "position": position,
+                        "queue_size": queue_size,
+                    },
+                )
+            logger.info(
+                "Queue advanced",
+                extra={"updates": [(sid, pos, qsize) for sid, pos, qsize in updates]},
+            )
+
         def run_agent():
+            acquired = False
             try:
+                subagent_queue.acquire(
+                    session_id,
+                    on_enqueue=_emit_queued,
+                    on_advance=_emit_advance,
+                )
+                acquired = True
                 agent = ExecutorAgent(container_client, session_manager)
                 result = agent.execute(
                     session_id=session_id,
@@ -95,6 +141,14 @@ def create_app(docker_mgr: DockerManager) -> Flask:
                         "processing_time_sec": 0,
                     },
                 )
+            finally:
+                # Semaphore release must run regardless of success / error /
+                # timeout / cancel. If ``acquire`` itself raised before we
+                # got a slot, we never incremented ``_free`` so there is
+                # nothing to give back — ``release`` is a no-op in that
+                # case.
+                if acquired:
+                    subagent_queue.release()
 
         thread = threading.Thread(target=run_agent, daemon=True)
         thread.start()
