@@ -680,9 +680,9 @@ class ExecutorAgent:
                     end_task_called = True
                     break
 
-                if tool_name not in {"bash", "python"}:
+                if tool_name not in {"bash", "python", "javascript"}:
                     messages.append(ToolMessage(
-                        content=f"Tool '{tool_name}' is not available. Use bash, python, or end_task.",
+                        content=f"Tool '{tool_name}' is not available. Use bash, python, javascript, or end_task.",
                         tool_call_id=tc_id,
                         name=tool_name,
                     ))
