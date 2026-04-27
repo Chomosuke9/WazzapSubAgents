@@ -2,6 +2,10 @@
 
 Standalone helper service that manages Docker containers, agent execution, and endpoints for WazzapAgents.
 
+For a deep dive into how the service works end-to-end — request lifecycle,
+sidecar architecture, file-sharing contract, skill system, and the agent loop —
+see [**ARCHITECTURE.md**](./ARCHITECTURE.md).
+
 ## Quick Start
 
 ### 1. Environment

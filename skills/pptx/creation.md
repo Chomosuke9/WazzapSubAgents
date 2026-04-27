@@ -456,7 +456,7 @@ s5.addText("contact@startup.com | startup.com", {
 });
 
 // SAVE
-pptx.writeFile({ fileName: "/output/pitch_deck.pptx" })
+pptx.writeFile({ fileName: "pitch_deck.pptx" })
   .then(() => console.log("✓ Pitch deck created"))
   .catch(err => console.error("Error:", err));
 ```
@@ -585,7 +585,7 @@ def add_content_slide(prs, title, bullets):
 
 ### Save Presentation
 ```python
-prs.save("/output/presentation.pptx")
+prs.save("presentation.pptx")
 print("✓ Presentation created")
 ```
 

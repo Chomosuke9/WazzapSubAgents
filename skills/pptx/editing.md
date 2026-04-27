@@ -12,7 +12,7 @@ prs = Presentation("template.pptx")
 # ... modifications ...
 
 # Save (overwrite or new file)
-prs.save("/output/modified.pptx")
+prs.save("modified.pptx")
 print("✓ Presentation saved")
 ```
 
@@ -76,7 +76,7 @@ for slide in prs.slides:
                         if old in run.text:
                             run.text = run.text.replace(old, new)
 
-prs.save("/output/replaced.pptx")
+prs.save("replaced.pptx")
 print("✓ Text replaced successfully")
 ```
 
@@ -108,7 +108,7 @@ p.font.size = Pt(14)
 p.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
 p.alignment = PP_ALIGN.LEFT
 
-prs.save("/output/modified.pptx")
+prs.save("modified.pptx")
 ```
 
 ### Format Text Runs
@@ -131,7 +131,7 @@ for slide in prs.slides:
                     run.font.color.rgb = RGBColor(0x1B, 0x3A, 0x5C)
                     run.font.name = "Calibri"
 
-prs.save("/output/reformatted.pptx")
+prs.save("reformatted.pptx")
 ```
 
 ---
@@ -152,7 +152,7 @@ new_slide = prs.slides.add_slide(slide_layout)
 blank_layout = prs.slide_layouts[6]
 blank_slide = prs.slides.add_slide(blank_layout)
 
-prs.save("/output/with_new_slides.pptx")
+prs.save("with_new_slides.pptx")
 ```
 
 ### Delete Slide
@@ -171,7 +171,7 @@ def delete_slide(prs, index):
 # Delete the 3rd slide (0-indexed: 2)
 delete_slide(prs, 2)
 
-prs.save("/output/slide_deleted.pptx")
+prs.save("slide_deleted.pptx")
 print("✓ Slide deleted")
 ```
 
@@ -203,7 +203,7 @@ def duplicate_slide(prs, slide_index):
 
 prs = Presentation("template.pptx")
 duplicate_slide(prs, 0)  # Duplicate first slide
-prs.save("/output/duplicated.pptx")
+prs.save("duplicated.pptx")
 ```
 
 ### Reorder Slides
@@ -227,7 +227,7 @@ def move_slide(prs, old_index, new_index):
 prs = Presentation("presentation.pptx")
 # Move slide 5 to position 2
 move_slide(prs, 4, 1)
-prs.save("/output/reordered.pptx")
+prs.save("reordered.pptx")
 ```
 
 ---
@@ -254,7 +254,7 @@ for slide in prs.slides:
             # Body/content placeholder
             shape.text = "This is the content of the slide."
 
-prs.save("/output/filled_placeholders.pptx")
+prs.save("filled_placeholders.pptx")
 ```
 
 ### Common Placeholder Indices
@@ -329,7 +329,7 @@ for row_idx, row_data in enumerate(data, 1):
             paragraph.font.size = Pt(12)
             paragraph.alignment = PP_ALIGN.CENTER
 
-prs.save("/output/table_presentation.pptx")
+prs.save("table_presentation.pptx")
 print("✓ Table presentation created")
 ```
 
@@ -357,7 +357,7 @@ for slide in prs.slides:
             # python-pptx doesn't support adding rows to existing tables directly
             # Recreate the table if you need more rows
 
-prs.save("/output/modified_table.pptx")
+prs.save("modified_table.pptx")
 ```
 
 ---
@@ -389,7 +389,7 @@ slide.shapes.add_picture(
     width=Inches(5),  # Height auto-calculated
 )
 
-prs.save("/output/with_images.pptx")
+prs.save("with_images.pptx")
 ```
 
 ### Process Images with Pillow Before Inserting
@@ -423,7 +423,7 @@ slide = prs.slides.add_slide(prs.slide_layouts[6])
 prepared = prepare_image("large_photo.jpg", "temp_photo.png")
 slide.shapes.add_picture(prepared, Inches(1), Inches(1), width=Inches(8))
 
-prs.save("/output/with_optimized_images.pptx")
+prs.save("with_optimized_images.pptx")
 
 # Cleanup
 os.remove("temp_photo.png")
@@ -479,7 +479,7 @@ for slide in prs.slides:
     notes_slide = slide.notes_slide
     notes_slide.notes_text_frame.text = "Speaker notes for this slide..."
 
-prs.save("/output/with_notes.pptx")
+prs.save("with_notes.pptx")
 ```
 
 ### Read Speaker Notes
@@ -557,7 +557,7 @@ def merge_presentations(output_path, input_files):
     print(f"✓ Merged {len(input_files)} presentations into {output_path}")
 
 merge_presentations(
-    "/output/merged.pptx",
+    "merged.pptx",
     ["part1.pptx", "part2.pptx", "part3.pptx"]
 )
 ```

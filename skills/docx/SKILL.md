@@ -185,15 +185,15 @@ const doc = new Document({
 
 // Save to file
 Packer.toBuffer(doc).then(buffer => {
-  fs.writeFileSync("/output/letter.docx", buffer);
-  console.log("✓ Document created: /output/letter.docx");
+  fs.writeFileSync("letter.docx", buffer);
+  console.log("✓ Document created: letter.docx");
 });
 ```
 
 ### Table Template (Invoice)
 
 ```javascript
-const { Document, Packer, Paragraph, Table, TableRow, TableCell, TextRun, AlignmentType, WidthType, BorderStyle, convertInchesToTwip } = require("docx");
+const { Document, Packer, Paragraph, Table, TableRow, TableCell, TextRun, HeadingLevel, AlignmentType, WidthType, BorderStyle, convertInchesToTwip } = require("docx");
 const fs = require("fs");
 
 const doc = new Document({
@@ -236,21 +236,21 @@ const doc = new Document({
           new TableRow({
             children: [
               new TableCell({
-                children: [new Paragraph({ text: "Description", bold: true })],
+                children: [new Paragraph({ children: [new TextRun({ text: "Description", bold: true })] })],
                 shading: { fill: "D3D3D3" }
               }),
               new TableCell({
-                children: [new Paragraph({ text: "Qty", bold: true })],
+                children: [new Paragraph({ children: [new TextRun({ text: "Qty", bold: true })] })],
                 shading: { fill: "D3D3D3" },
                 width: { size: 10, type: WidthType.PERCENTAGE }
               }),
               new TableCell({
-                children: [new Paragraph({ text: "Price", bold: true })],
+                children: [new Paragraph({ children: [new TextRun({ text: "Price", bold: true })] })],
                 shading: { fill: "D3D3D3" },
                 width: { size: 20, type: WidthType.PERCENTAGE }
               }),
               new TableCell({
-                children: [new Paragraph({ text: "Total", bold: true })],
+                children: [new Paragraph({ children: [new TextRun({ text: "Total", bold: true })] })],
                 shading: { fill: "D3D3D3" },
                 width: { size: 20, type: WidthType.PERCENTAGE }
               })
@@ -283,9 +283,8 @@ const doc = new Document({
       
       // Total
       new Paragraph({
-        text: "Total: Rp 100,000",
+        children: [new TextRun({ text: "Total: Rp 100,000", bold: true })],
         alignment: AlignmentType.RIGHT,
-        bold: true,
         spacing: { after: 200 }
       })
     ]
@@ -293,8 +292,8 @@ const doc = new Document({
 });
 
 Packer.toBuffer(doc).then(buffer => {
-  fs.writeFileSync("/output/invoice.docx", buffer);
-  console.log("✓ Invoice created: /output/invoice.docx");
+  fs.writeFileSync("invoice.docx", buffer);
+  console.log("✓ Invoice created: invoice.docx");
 });
 ```
 
@@ -408,8 +407,8 @@ const doc = new Document({
 });
 
 Packer.toBuffer(doc).then(buffer => {
-  fs.writeFileSync("/output/makalah.docx", buffer);
-  console.log("✓ Makalah created: /output/makalah.docx");
+  fs.writeFileSync("makalah.docx", buffer);
+  console.log("✓ Makalah created: makalah.docx");
 });
 ```
 
@@ -424,15 +423,13 @@ const doc = new Document({
     children: [
       // Header
       new Paragraph({
-        text: "KEMENTERIAN PENDIDIKAN, KEBUDAYAAN, RISET, DAN TEKNOLOGI",
+        children: [new TextRun({ text: "KEMENTERIAN PENDIDIKAN, KEBUDAYAAN, RISET, DAN TEKNOLOGI", bold: true })],
         alignment: AlignmentType.CENTER,
-        bold: true,
         spacing: { after: 50 }
       }),
       new Paragraph({
-        text: "UNIVERSITAS INDONESIA",
+        children: [new TextRun({ text: "UNIVERSITAS INDONESIA", bold: true })],
         alignment: AlignmentType.CENTER,
-        bold: true,
         spacing: { after: 50 }
       }),
       new Paragraph({
@@ -508,8 +505,7 @@ const doc = new Document({
       
       // Supporting reasons
       new Paragraph({
-        text: "Alasan Permohonan:",
-        bold: true,
+        children: [new TextRun({ text: "Alasan Permohonan:", bold: true })],
         spacing: { after: 100 }
       }),
       new Paragraph({
@@ -547,8 +543,8 @@ const doc = new Document({
 });
 
 Packer.toBuffer(doc).then(buffer => {
-  fs.writeFileSync("/output/surat_permohonan.docx", buffer);
-  console.log("✓ Surat Permohonan created: /output/surat_permohonan.docx");
+  fs.writeFileSync("surat_permohonan.docx", buffer);
+  console.log("✓ Surat Permohonan created: surat_permohonan.docx");
 });
 ```
 
@@ -583,8 +579,7 @@ const doc = new Document({
         spacing: { after: 50 }
       }),
       new Paragraph({
-        text: "[NAMA PENERIMA UNDANGAN]",
-        bold: true,
+        children: [new TextRun({ text: "[NAMA PENERIMA UNDANGAN]", bold: true })],
         spacing: { after: 50 }
       }),
       new Paragraph({
@@ -673,8 +668,7 @@ const doc = new Document({
       
       // RSVP
       new Paragraph({
-        text: "Konfirmasi Kehadiran:",
-        bold: true,
+        children: [new TextRun({ text: "Konfirmasi Kehadiran:", bold: true })],
         spacing: { after: 100 }
       }),
       new Paragraph({
@@ -714,8 +708,8 @@ const doc = new Document({
 });
 
 Packer.toBuffer(doc).then(buffer => {
-  fs.writeFileSync("/output/surat_undangan.docx", buffer);
-  console.log("✓ Surat Undangan created: /output/surat_undangan.docx");
+  fs.writeFileSync("surat_undangan.docx", buffer);
+  console.log("✓ Surat Undangan created: surat_undangan.docx");
 });
 ```
 
@@ -732,7 +726,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from datetime import datetime
 
 # Load existing document
-doc = Document("/input/template.docx")
+doc = Document("./input/template.docx")
 
 # Add content
 doc.add_heading("Report Title", level=1)
@@ -757,8 +751,8 @@ data_cells[2].text = "OK"
 doc.add_paragraph("This is a sample paragraph with some content.", style='Normal')
 
 # Save
-doc.save("/output/report.docx")
-print("✓ Document updated: /output/report.docx")
+doc.save("report.docx")
+print("✓ Document updated: report.docx")
 ```
 
 ### Replace Text in Existing Document
@@ -767,7 +761,7 @@ print("✓ Document updated: /output/report.docx")
 from docx import Document
 
 # Load document
-doc = Document("/input/template.docx")
+doc = Document("./input/template.docx")
 
 # Replace placeholder text
 replacements = {
@@ -790,8 +784,8 @@ for table in doc.tables:
                     if old_text in paragraph.text:
                         paragraph.text = paragraph.text.replace(old_text, new_text)
 
-doc.save("/output/filled_template.docx")
-print("✓ Template filled: /output/filled_template.docx")
+doc.save("filled_template.docx")
+print("✓ Template filled: filled_template.docx")
 ```
 
 ---
@@ -799,9 +793,9 @@ print("✓ Template filled: /output/filled_template.docx")
 ## Best Practices for Sub-Agent
 
 ### 1. **File Paths**
-- Input: `/input/` or pass as parameter
-- Output: `/output/` (mounted in container)
-- Always verify paths exist before writing
+- Input files are staged by the orchestrator under `./input/` inside the agent's workdir; the exact paths are listed in the system prompt under "Input files". Use those paths verbatim.
+- Write output to the current working directory (workdir) using a relative path (e.g. `./invoice.docx`). Never hard-code `/output/` or any other absolute path — that directory does not exist in the sidecar.
+- Only list **deliverable** files in `end_task(output_files=[...])`; skip scratch/temp/intermediate files.
 
 ### 2. **Error Handling**
 ```javascript
@@ -855,7 +849,7 @@ except Exception as e:
 3. **Prepare template/code** with data
 4. **Execute** (npm run / python script)
 5. **Validate output** file
-6. **Return path** to bot: `/output/filename.docx`
+6. **Return deliverable paths** via `end_task(output_files=["./filename.docx"])`
 7. **Bot sends** document via WhatsApp API
 
 ### Example Sub-Agent Request Structure
@@ -871,7 +865,7 @@ except Exception as e:
     ],
     "total": 100000
   },
-  "output_path": "/output/invoice_2025_001.docx"
+  "output_file": "./invoice_2025_001.docx"
 }
 ```
 
