@@ -259,10 +259,9 @@ def test_resolve_declared_output_files_only_returns_declared_paths(tmp_path):
     assert accepted == [str(deliverable.resolve())]
 
 
-def test_resolve_declared_output_files_rejects_input_paths(tmp_path):
-    """Paths inside ``<workdir>/.inputs/`` must be dropped — those are
-    caller-supplied inputs and re-shipping them would dupe the user's
-    own file as a fresh deliverable."""
+def test_resolve_declared_output_files_allows_input_paths(tmp_path):
+    """Paths inside ``<workdir>/input/`` are now allowed — the restriction
+    was removed so agents can return original files if needed."""
     from src.input_staging import INPUT_SUBDIR
 
     workdir = tmp_path / "session-x"
@@ -279,7 +278,8 @@ def test_resolve_declared_output_files_rejects_input_paths(tmp_path):
         str(workdir), [str(user_doc), str(legit_output)], session_id="s1",
     )
 
-    assert accepted == [str(legit_output.resolve())]
+    # Both the input file and the new output should be accepted
+    assert set(accepted) == {str(user_doc.resolve()), str(legit_output.resolve())}
 
 
 def test_resolve_declared_output_files_rejects_paths_outside_workdir(tmp_path):

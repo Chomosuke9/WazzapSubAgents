@@ -20,7 +20,7 @@ services:
       dockerfile: Dockerfile
     image: executor-service:v1.0.0
     ports:
-      - "5000:5000"  # Main service
+      - "5000:5000" # Main service
     environment:
       FLASK_PORT: "5000"
       CONTAINER_EXECUTOR_URL: "http://executor-executor:5001"
@@ -32,7 +32,7 @@ services:
       # Sessions store their workdir under WORKDIR_BASE. Keep this in sync
       # with the executor-executor sidecar so bash/python tool output lands
       # in the same place we collect output_files from.
-      WORKDIR_BASE: ${SUBAGENT_WORKDIR_BASE:-/storage/subagent_work}
+      WORKDIR_BASE: ${WORKDIR_BASE:-/storage/subagent_work}
     volumes:
       # Shared exchange directory: read-write so the bridge can stage
       # input_files here and the agent can write output_files here.
@@ -53,20 +53,21 @@ services:
       timeout: 5s
       retries: 3
 
-  executor-executor:  # In-container executor sidecar
+  executor-executor: # In-container executor sidecar
     image: executor-service:v1.0.0
     command: python -m src.executor_server
     ports:
       - "5001:5001"
     environment:
       FLASK_PORT: "5001"
-      WORKDIR_BASE: ${SUBAGENT_WORKDIR_BASE:-/storage/subagent_work}
+      WORKDIR_BASE: ${WORKDIR_BASE:-/storage/subagent_work}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       # Same shared mount as the main service so bash/python tools can
       # read input_files staged by the bridge AND write outputs to a
       # path the bridge can read after the task completes.
       - ${SUBAGENT_STORAGE_DIR:-/storage}:/storage:rw
+      - ./skills:/app/skills:ro # ← read-only skills
     networks:
       - executor-net
     restart: unless-stopped

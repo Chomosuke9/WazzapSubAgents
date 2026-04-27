@@ -34,21 +34,14 @@ BASH_TOOL_SCHEMA: Dict[str, Any] = {
     "function": {
         "name": "bash",
         "description": (
-            "Execute a bash shell command inside the executor sidecar. "
-            "Use this for file operations, installations, and running "
-            "external programs."
+            "Execute a bash shell."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": (
-                        "Short explanation (1 sentence) of WHY you are "
-                        "running this command, e.g. 'Mengekstrak zip yang "
-                        "diterima'. Surfaced as a progress update to the "
-                        "bridge."
-                    ),
+                    "description": "Short explanation of WHY you are running this command.",
                     "minLength": 1,
                 },
                 "command": {
@@ -68,19 +61,14 @@ PYTHON_TOOL_SCHEMA: Dict[str, Any] = {
     "function": {
         "name": "python",
         "description": (
-            "Execute Python code inside the executor sidecar. "
-            "Use this for data processing, parsing, and calculations."
+            "Execute Python code."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": (
-                        "Short explanation (1 sentence) of WHY you are "
-                        "running this code, e.g. 'Parsing PDF jadi JSON'. "
-                        "Surfaced as a progress update to the bridge."
-                    ),
+                    "description": "Short explanation of WHY you are running this code.",
                     "minLength": 1,
                 },
                 "code": {
@@ -100,9 +88,8 @@ END_TASK_TOOL_SCHEMA: Dict[str, Any] = {
     "function": {
         "name": "end_task",
         "description": (
-            "Finish the task and report results back to the caller. Call "
-            "this exactly once when the instruction is fully resolved or "
-            "cannot be completed."
+            "Finish the task and report results back to the caller.\n"
+            "Call this when the instruction is fully resolved or cannot be completed."
         ),
         "parameters": {
             "type": "object",
@@ -122,14 +109,10 @@ END_TASK_TOOL_SCHEMA: Dict[str, Any] = {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Optional. Absolute paths of files YOU explicitly want "
-                        "to send back to the user. Only list files that are "
-                        "actually meant as deliverables — never temp / cache / "
-                        "log / intermediate files. Omit entirely (or pass []) "
-                        "when the task does not produce a file to share (e.g. "
-                        "a calculation, a yes/no answer). Paths must live "
-                        "inside the workdir; anything in `.inputs/` is "
-                        "rejected because those are caller-supplied inputs."
+                        "Optional. Absolute paths of files to be sent back to the user.\n"
+                        "- Include only final deliverables (reports, generated images, etc.).\n"
+                        "- Exclude temporary files, logs, or scripts.\n"
+                        "- Paths must be within the workdir."
                     ),
                 },
             },
@@ -139,9 +122,37 @@ END_TASK_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+JAVASCRIPT_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "javascript",
+        "description": (
+            "Execute JavaScript code (Node.js 24)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Short explanation of WHY you are running this code.",
+                    "minLength": 1,
+                },
+                "code": {
+                    "type": "string",
+                    "description": "The JavaScript source code to execute.",
+                    "minLength": 1,
+                },
+            },
+            "required": ["reason", "code"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     BASH_TOOL_SCHEMA,
     PYTHON_TOOL_SCHEMA,
+    JAVASCRIPT_TOOL_SCHEMA,
     END_TASK_TOOL_SCHEMA,
 ]
 
@@ -244,6 +255,27 @@ class ExecutorAgent:
             return f"ERROR:\n{result['error']}"
         return f"OUTPUT:\n{result.get('output', '')}"
 
+    def _javascript_tool(self, reason: str, code: str, session_id: str) -> str:
+        self.session_manager.append_progress(session_id, {
+            "step": "javascript",
+            "reason": (reason or "")[:500],
+            "detail": str({"reason": reason, "code": code})[:500],
+            "timestamp": time.time(),
+        })
+        result = self.container_client.run_javascript(code, session_id=session_id)
+        self.logger.info(
+            "javascript_tool executed",
+            extra={
+                "session_id": session_id,
+                "reason": (reason or "")[:200],
+                "code": code[:200],
+            },
+        )
+        if "error" in result:
+            return f"ERROR:\n{result['error']}"
+        output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
+        return output
+
     def _end_task_tool(
         self,
         success: bool,
@@ -276,6 +308,12 @@ class ExecutorAgent:
             )
         if tool_name == "python":
             return self._python_tool(
+                reason=arguments.get("reason", ""),
+                code=arguments.get("code", ""),
+                session_id=session_id,
+            )
+        if tool_name == "javascript":
+            return self._javascript_tool(
                 reason=arguments.get("reason", ""),
                 code=arguments.get("code", ""),
                 session_id=session_id,
@@ -320,17 +358,12 @@ class ExecutorAgent:
         Only paths that meet ALL of the following are accepted:
 
         - resolve to a regular file that exists,
-        - sit inside ``workdir`` (no traversal outside the sandbox),
-        - are NOT inside ``<workdir>/.inputs/`` (those are caller-supplied
-          inputs — echoing them back would dupe the user's own file as a
-          fresh "deliverable").
+        - sit inside ``workdir`` (no traversal outside the sandbox).
 
         Anything else is dropped with a logged warning. Returning a strict
         subset (rather than failing the whole task) lets the user still get
         the textual report when the model lists a couple of bogus paths.
         """
-        from src.input_staging import is_input_path
-
         if not declared:
             return []
 
@@ -362,9 +395,7 @@ class ExecutorAgent:
                 skipped.append({"path": raw_path, "reason": "outside_workdir"})
                 continue
 
-            if is_input_path(workdir, resolved):
-                skipped.append({"path": raw_path, "reason": "is_input_file"})
-                continue
+
 
             if resolved in seen:
                 continue
@@ -385,27 +416,30 @@ class ExecutorAgent:
         return (
             "You are an executor agent. Your job is to fulfill the user's "
             "instruction by calling the provided tools.\n\n"
+            "Technical Documentation:\n"
+            "- If you need help with specific file formats (DOCX, PDF, XLSX, PPTX, etc.), "
+            "specialized documentation and code examples are available in `/app/skills/`. "
+            "You can explore this directory using `bash` (e.g., `ls -R /app/skills/`) and "
+            "read the `SKILL.md` files (e.g., `cat /app/skills/docx/SKILL.md`) to learn "
+            "best practices and available libraries.\n\n"
             "Tools available (call exactly one per turn — never reply with "
             "plain text, always invoke a tool):\n"
             "1. bash(reason, command) — run a bash command.\n"
             "2. python(reason, code) — run Python code.\n"
-            "3. end_task(success, report) — finish the task with a final report.\n\n"
+            "3. javascript (reason, code) — run Javascript code.\n"
+            "4. end_task(success, report) — finish the task with a final report.\n\n"
             "Rules:\n"
             "- The `reason` argument is REQUIRED on `bash` and `python`. Keep "
             "  it short (one sentence) and explain WHY you are running this "
             "  step. It is shown back to the orchestrating agent as a "
             "  progress update.\n"
-            "- Use bash for file operations, installations, running external programs.\n"
-            "- Use python for data processing, parsing, calculations.\n"
             "- If a tool returns an error, decide whether to retry, pivot, or fail.\n"
             "- Do not ask the user questions. Decide and act.\n"
             "- Input files are at the EXACT paths provided below — they have "
-            "already been staged inside the workdir for you. Use those paths "
-            "verbatim in `bash`/`python`. Do NOT search the filesystem for "
+            "already been staged inside the `input/` directory for you. Use those paths "
+            "verbatim in `bash`/`python`/`javascript`. Do NOT search the filesystem for "
             "alternative locations and do NOT invent new paths.\n"
-            "- Write output files anywhere inside the workdir EXCEPT the "
-            "`.inputs/` subdirectory (those are caller-supplied inputs and "
-            "will be rejected if you try to ship them back).\n"
+            "- Write output files anywhere inside the workdir.\n"
             "- When the instruction is fully resolved (or cannot be done), "
             "call `end_task` exactly once and stop.\n"
             "- `end_task` accepts an OPTIONAL `output_files` list. Only "

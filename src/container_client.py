@@ -49,6 +49,12 @@ class ContainerClient:
         logger.info("Python completed", extra={"session_id": session_id})
         return result
 
+    def run_javascript(self, code: str, session_id: str = "default") -> Dict[str, Any]:
+        logger.info("Running javascript in container", extra={"code": code[:200], "session_id": session_id})
+        result = self._post("/javascript", {"code": code, "session_id": session_id})
+        logger.info("Javascript completed", extra={"session_id": session_id})
+        return result
+
     def health_check(self) -> bool:
         try:
             resp = requests.get(f"{self.base_url}/health", timeout=5)

@@ -11,17 +11,14 @@ nothing at that path. The user-visible symptom is that the sub-agent fails
 with "file not found" on a file the bridge swears it just staged.
 
 The fix: before running the agent, copy each input file into
-``<workdir>/.inputs/<basename>``. ``<workdir>`` is rooted in
+``<workdir>/input/<basename>``. ``<workdir>`` is rooted in
 ``WORKDIR_BASE``, which IS bind-mounted at the same host/container path,
 so the copies are reachable from inside the container regardless of how
 the operator deployed the bridge. Cleanup is automatic — ``SessionManager``
 already ``rmtree``s the workdir when the session ends.
 
-The name ``.inputs`` is chosen so it is:
+The name ``input`` is chosen so it is:
 
-* Easy to filter out of ``output_files`` collection (see
-  :func:`is_input_path`) — we don't want input bytes to round-trip back to
-  WhatsApp as if they were freshly-generated outputs.
 * Distinct from anything the agent is likely to create itself
   (``output``/``out``/etc).
 """
@@ -36,14 +33,14 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 
-INPUT_SUBDIR = ".inputs"
+INPUT_SUBDIR = "input"
 
 
 def stage_inputs_into_workdir(
     workdir: str,
     raw_paths: Iterable[str],
 ) -> List[str]:
-    """Copy ``raw_paths`` into ``<workdir>/.inputs/`` and return the new paths.
+    """Copy ``raw_paths`` into ``<workdir>/input/`` and return the new paths.
 
     Files that don't exist or aren't regular files are silently skipped
     with a warning (the agent will see a shorter list and decide what to
@@ -111,17 +108,8 @@ def stage_inputs_into_workdir(
 
 
 def is_input_path(workdir: str, path: str) -> bool:
-    """Return True if ``path`` lives under ``<workdir>/.inputs/``.
+    """Return True if ``path`` lives under ``<workdir>/input/``.
 
-    Used by ``_collect_output_files`` so files we just staged don't get
-    returned to the bridge as if the agent had produced them — that would
-    cause the bridge to send the user back the same file they just sent.
+    Note: Currently disabled to allow input files to be returned as outputs.
     """
-    if not workdir or not path:
-        return False
-    inputs_root = os.path.realpath(os.path.join(workdir, INPUT_SUBDIR))
-    try:
-        candidate = os.path.realpath(path)
-    except OSError:
-        return False
-    return candidate == inputs_root or candidate.startswith(inputs_root + os.sep)
+    return False

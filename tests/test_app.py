@@ -60,10 +60,10 @@ def test_execute_restages_input_files_into_workdir(tmp_path, monkeypatch):
     "file not found" and the user gets back a "tidak ditemukan pada path
     yang dipakai" failure.
 
-    Fix: ``/execute`` re-stages each input into ``<workdir>/.inputs/`` so
+    Fix: ``/execute`` re-stages each input into ``<workdir>/input/`` so
     the agent always receives paths inside the bind-mounted workdir.
     Verify the agent ends up being called with paths whose parent is
-    ``<workdir>/.inputs`` rather than the caller-supplied source dir.
+    ``<workdir>/input`` rather than the caller-supplied source dir.
     """
     monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
     src_dir = tmp_path / "elsewhere"  # NOT inside WORKDIR_BASE
@@ -132,7 +132,7 @@ def test_execute_restages_input_files_into_workdir(tmp_path, monkeypatch):
     assert staged and len(staged) == 1
     # The agent must have been told the file's reachable path inside the
     # workdir, NOT the caller-supplied path that lives outside any mount.
-    assert ".inputs" in staged[0]
+    assert "input" in staged[0]
     assert staged[0].startswith(str(tmp_path / "work"))
     # Bytes survived the copy.
     with open(staged[0], "rb") as f:

@@ -1,5 +1,5 @@
 # Stage 1: Build (install dependencies once)
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 WORKDIR /app
 
 # Install system deps required for building Python packages
@@ -23,12 +23,9 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     libglib2.0-dev \
     libcairo2-dev \
-    poppler-utils \
-    tesseract-ocr \
-    ghostscript \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies directly (Docker-specific libraries)
+# Install Python dependencies directly
 RUN pip install --no-cache-dir --user \
     Flask==3.0.0 \
     langchain==0.1.20 \
@@ -43,35 +40,34 @@ RUN pip install --no-cache-dir --user \
     pytest-asyncio==0.21.1 \
     pdfplumber \
     pdf2image \
-    pdfminer.six \
     pypdf \
     pytesseract \
     Pillow \
     opencv-python-headless \
-    scikit-image \
-    imageio \
     numpy \
     pandas \
     beautifulsoup4 \
     lxml \
     openpyxl \
-    xlsxwriter \
     python-docx \
     python-pptx \
     reportlab \
     markdownify \
-    scipy \
-    sympy \
-    py7zr \
-    rarfile
+    "markitdown[pptx]"
 
 # Stage 2: Runtime (copy pre-installed packages only)
-FROM python:3.11-slim
+FROM python:3.14-slim
 WORKDIR /app
 
-# Install runtime system libs (only what's needed from requirements.txt)
+# Install Node.js 24 and global skill dependencies
+RUN apt-get update && apt-get install -y curl \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g pptxgenjs docx pdf-lib \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install runtime system libs, fonts, and skill dependencies
 RUN apt-get update && apt-get install -y \
-    curl \
     libssl3 \
     libffi8 \
     libxml2 \
@@ -88,6 +84,12 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     tesseract-ocr \
     ghostscript \
+    libreoffice \
+    qpdf \
+    fonts-liberation \
+    fonts-dejavu \
+    fontconfig \
+    && fc-cache -f -v \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-installed Python packages from builder
@@ -96,9 +98,12 @@ COPY --from=builder /root/.local /root/.local
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
 
+
+
 # Copy application code
 COPY src/ ./src/
 COPY main.py .
+COPY skills/ ./skills/
 
 EXPOSE 5000 5001
 

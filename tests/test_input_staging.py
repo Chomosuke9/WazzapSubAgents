@@ -4,7 +4,7 @@ Bug being guarded against: WazzapAgents stages input_files at host paths
 that aren't bind-mounted into the executor sidecar, so the agent's
 bash/python tools see "file not found" and the user gets back a "tidak
 ditemukan pada path yang dipakai" message even though the bridge swore it
-just staged the file. Re-staging into ``<workdir>/.inputs/`` makes the
+just staged the file. Re-staging into ``<workdir>/input/`` makes the
 files visible inside the container regardless of how the bridge was
 configured.
 """

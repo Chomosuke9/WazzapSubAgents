@@ -91,7 +91,7 @@ class DockerManager:
             # and preserve the native flow that worked before. The shared
             # `/storage` mount is added on top so input_files staged by
             # WazzapAgents under /storage/subagent_in/<id>/ are readable.
-            workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
+            workdir_base = os.getenv("WORKDIR_BASE", "/storage/subagent_work")
             storage_dir_host = os.getenv("SUBAGENT_STORAGE_DIR", "/storage")
             storage_dir_container = "/storage"
 
@@ -99,6 +99,20 @@ class DockerManager:
                 "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},
                 workdir_base: {"bind": workdir_base, "mode": "rw"},
             }
+
+            # Project code and skills — read-only, agent must never modify these
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            skills_dir = os.path.join(project_root, "skills")
+            src_dir = os.path.join(project_root, "src")
+            main_py = os.path.join(project_root, "main.py")
+
+            if os.path.isdir(skills_dir):
+                volumes[skills_dir] = {"bind": "/app/skills", "mode": "ro"}
+            if os.path.isdir(src_dir):
+                volumes[src_dir] = {"bind": "/app/src", "mode": "ro"}
+            if os.path.isfile(main_py):
+                volumes[main_py] = {"bind": "/app/main.py", "mode": "ro"}
+
             # Only mount /storage if it actually exists on the host —
             # otherwise Docker happily creates an empty directory at the
             # host path which is rarely what the operator wanted.

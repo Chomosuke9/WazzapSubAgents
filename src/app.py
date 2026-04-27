@@ -59,7 +59,7 @@ def create_app(
             return jsonify({"success": False, "report": str(exc)}), 400
         session_manager.set_callback(session_id, callback_url, progress_webhook)
 
-        # Re-stage the caller's input files into ``<workdir>/.inputs/`` so the
+        # Re-stage the caller's input files into ``<workdir>/input/`` so the
         # paths handed to the agent's bash/python tools are reachable from
         # inside the executor sidecar. Without this, paths that live outside
         # the container's bind-mounts (e.g. WazzapAgents' default

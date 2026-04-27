@@ -20,7 +20,7 @@ _PY_EXEC_LOCK = threading.Lock()
 
 def create_executor_app() -> Flask:
     app = Flask(__name__)
-    workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
+    workdir_base = os.getenv("WORKDIR_BASE", "/storage/subagent_work")
 
     def _resolve_workdir(session_id: str) -> str:
         """Resolve the per-session workdir, applying the same sanitization
@@ -69,6 +69,43 @@ def create_executor_app() -> Flask:
             "stderr": result.stderr,
             "returncode": result.returncode,
         })
+
+    @app.post("/javascript")
+    def javascript():
+        data = request.get_json(force=True)
+        code = data.get("code", "")
+        session_id = data.get("session_id", "default")
+        try:
+            workdir = _resolve_workdir(session_id)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        os.makedirs(workdir, exist_ok=True)
+        logger.info("Executing javascript", extra={"session_id": session_id, "code": code[:200]})
+
+        # Write code to a temporary file to avoid shell escaping issues with complex scripts
+        js_file = os.path.join(workdir, f".tmp_script_{os.getpid()}.js")
+        try:
+            with open(js_file, "w") as f:
+                f.write(code)
+
+            result = subprocess.run(
+                ["node", js_file],
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            return jsonify({
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode,
+            })
+        except Exception as e:
+            logger.error("Javascript execution failed", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+        finally:
+            if os.path.exists(js_file):
+                os.remove(js_file)
 
     @app.post("/python")
     def python():

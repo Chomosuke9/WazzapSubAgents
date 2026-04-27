@@ -44,7 +44,7 @@ class SessionManager:
             # from. Defaults to /tmp/work for backwards compatibility, but
             # docker-compose overrides it to a host-shared path so WazzapAgents
             # can read the resulting files.
-            workdir_base = os.getenv("WORKDIR_BASE", "/tmp/work")
+            workdir_base = os.getenv("WORKDIR_BASE", "/storage/subagent_work")
             # `session_id` is taken straight from the HTTP request body
             # (src/app.py) with no content validation, and
             # `cleanup_session` later runs `shutil.rmtree(session.workdir)`.
