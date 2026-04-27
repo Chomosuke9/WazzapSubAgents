@@ -849,7 +849,7 @@ except Exception as e:
 3. **Prepare template/code** with data
 4. **Execute** (npm run / python script)
 5. **Validate output** file
-6. **Return deliverable paths** via `end_task(output_files=["./filename.docx"])`
+6. **Return deliverable paths** via `end_task(output_files=[...])` — use **absolute paths** (the workdir is in the system prompt)
 7. **Bot sends** document via WhatsApp API
 
 ### Example Sub-Agent Request Structure
