@@ -876,7 +876,7 @@ except Exception as e:
 | Issue | Solution |
 |-------|----------|
 | Module not found | Verify npm/pip install in container; check requirements.txt |
-| File permission denied | Check /output directory writable; use chmod 777 if needed |
+| File permission denied | Check workdir is writable; use chmod 777 if needed |
 | Placeholder not replaced | Ensure exact text match; check for hidden characters |
 | Large file size | Reduce images; remove unnecessary formatting; use compression |
 | Memory error on large docs | Stream if possible; split document into sections |
