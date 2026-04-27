@@ -426,7 +426,7 @@ class ExecutorAgent:
             "plain text, always invoke a tool):\n"
             "1. bash(reason, command) — run a bash command.\n"
             "2. python(reason, code) — run Python code.\n"
-            "3. javascript (reason, code) — run Javascript code.\n"
+            "3. javascript(reason, code) — run Javascript code.\n"
             "4. end_task(success, report) — finish the task with a final report.\n\n"
             "Rules:\n"
             "- The `reason` argument is REQUIRED on `bash`, `python`, and `javascript`. Keep "
