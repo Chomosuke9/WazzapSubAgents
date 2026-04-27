@@ -13,15 +13,16 @@ with pdfplumber.open("file.pdf") as pdf:
         print(text)
 ```
 
-### Strategy 2: Structured Block Extraction
-**Best for:** Identifying headers, paragraphs, distinct sections
+### Strategy 2: Line-by-Line Extraction (preserve visual lines)
+**Best for:** Identifying headers, paragraphs, reading order
 ```python
 with pdfplumber.open("file.pdf") as pdf:
     page = pdf.pages[0]
-    blocks = page.extract_blocks()
-    # blocks = [{"x0": ..., "top": ..., "text": "...", ...}, ...]
-    for block in blocks:
-        print(f"Block at ({block['x0']}, {block['top']}): {block['text']}")
+    # extract_text_lines() returns per-visual-line dicts with position info.
+    # (pdfplumber does NOT have extract_blocks() — group lines into
+    # "blocks" yourself using x0 / top thresholds.)
+    for line in page.extract_text_lines():
+        print(f"Line at ({line['x0']}, {line['top']}): {line['text']}")
 ```
 
 ### Strategy 3: Word-by-Word Extraction
@@ -196,16 +197,15 @@ for i, image in enumerate(images):
 ### Option C: Extract embedded images (pypdf)
 ```python
 from pypdf import PdfReader
-import io
-from PIL import Image
 
 reader = PdfReader("doc.pdf")
 for page_idx, page in enumerate(reader.pages):
-    for obj_idx, obj in enumerate(page["/Resources"]["/XObject"].get_object().values()):
-        if obj["/Subtype"] == "/Image":
-            data = obj.get_data()
-            image = Image.open(io.BytesIO(data))
-            image.save(f"extracted_{page_idx}_{obj_idx}.png")
+    # `page.images` is the supported pypdf API and yields ImageFile objects
+    # with .name, .data (raw bytes) and .image (PIL image).
+    for img_idx, image in enumerate(page.images):
+        out_path = f"extracted_p{page_idx+1}_{img_idx+1}_{image.name or 'img.bin'}"
+        with open(out_path, "wb") as f:
+            f.write(image.data)
 ```
 
 ### Option D: Extract images using poppler-utils (CLI)
@@ -332,7 +332,7 @@ for pdf_file in Path(pdf_dir).glob("*.pdf"):
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | No text extracted | PDF is image-based | Use OCR (pytesseract + pdf2image) |
-| Layout lost | Text extraction flattens structure | Use `extract_blocks()` instead |
+| Layout lost | Text extraction flattens structure | Use `extract_text_lines()` or `extract_words()` and group by `top` / `x0` |
 | Tables not found | Complex formatting | Try manual `settings` or use crop regions |
 | OCR too slow | High DPI | Reduce to 200 DPI or preprocess images with OpenCV |
 | Memory error | Huge PDF | Process page-by-page, don't load all at once |

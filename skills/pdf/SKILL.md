@@ -88,9 +88,10 @@ import pdfplumber
 
 with pdfplumber.open("document.pdf") as pdf:
     for page in pdf.pages:
-        text = page.extract_text()  # Layout-aware
-        blocks = page.extract_blocks()  # Structured blocks
-        tables = page.extract_tables()  # Table data as lists
+        text = page.extract_text()           # Layout-aware single string
+        words = page.extract_words()         # [{text, x0, top, ...}, ...]
+        lines = page.extract_text_lines()    # [{text, x0, top, chars, ...}, ...]
+        tables = page.extract_tables()       # Table data as lists
 ```
 
 **Example: OCR a scanned PDF**
@@ -201,18 +202,18 @@ with pdfplumber.open("report.pdf") as pdf:
                 writer.writerows(table)
 ```
 
-**Images:** Extract embedded images
+**Images:** Extract embedded images with pypdf's `page.images` iterator. Each
+`ImageFile` exposes `.name`, `.data` (raw bytes) and `.image` (PIL image):
 ```python
 from pypdf import PdfReader
 
 reader = PdfReader("doc.pdf")
 for page_idx, page in enumerate(reader.pages):
-    image_list = page.get_images()
-    for img_idx, img_id in enumerate(image_list):
-        obj = reader.get_object(img_id)
-        data = obj.get_data()
-        with open(f"img_p{page_idx+1}_{img_idx+1}.png", "wb") as f:
-            f.write(data)
+    for img_idx, image in enumerate(page.images):
+        # image.name already includes the embedded extension (e.g. "Im0.png")
+        out_path = f"img_p{page_idx+1}_{img_idx+1}_{image.name or 'img.bin'}"
+        with open(out_path, "wb") as f:
+            f.write(image.data)
 ```
 
 ---
@@ -220,7 +221,8 @@ for page_idx, page in enumerate(reader.pages):
 ### 4. PDF CREATION & GENERATION
 
 **Use `reportlab` (Python)** for programmatic PDF creation:
-- Canvas-based drawing (shapes, text, images, tables)
+- Canvas-based drawing (shapes, text, images)
+- Platypus flow layout (`SimpleDocTemplate` + `Table`, `Paragraph`) for reports/invoices
 - Ideal for invoices, certificates, reports, labels
 - Full control over layout
 
@@ -229,46 +231,48 @@ for page_idx, page in enumerate(reader.pages):
 - Lightweight page manipulation
 - Browser/Node interop
 
-**Example: Generate invoice PDF**
+**Example: Generate invoice PDF (Platypus — handles table rendering automatically)**
 ```python
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
-from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+)
+from reportlab.lib.styles import getSampleStyleSheet
 from datetime import datetime
 
-c = canvas.Canvas("invoice.pdf", pagesize=letter)
-width, height = letter
+styles = getSampleStyleSheet()
+doc = SimpleDocTemplate("invoice.pdf", pagesize=letter)
+story = []
 
-# Header
-c.setFont("Helvetica-Bold", 24)
-c.drawString(1*inch, height - 1*inch, "INVOICE")
+story.append(Paragraph("INVOICE", styles["Title"]))
+story.append(Paragraph(
+    f"Date: {datetime.now().strftime('%Y-%m-%d')}", styles["Normal"]
+))
+story.append(Spacer(1, 0.3 * inch))
 
-# Date
-c.setFont("Helvetica", 10)
-c.drawString(1*inch, height - 1.5*inch, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
-
-# Invoice details table
 data = [
     ["Item", "Qty", "Price", "Total"],
     ["Widget A", "10", "$5.00", "$50.00"],
     ["Widget B", "5", "$10.00", "$50.00"],
 ]
-
-from reportlab.platypus import Table, TableStyle
-from reportlab.lib import colors
-
 table = Table(data, colWidths=[2*inch, 1*inch, 1.5*inch, 1.5*inch])
 table.setStyle(TableStyle([
-    ("BACKGROUND", (0,0), (-1,0), colors.grey),
-    ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke),
-    ("ALIGN", (0,0), (-1,-1), "CENTER"),
-    ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-    ("FONTSIZE", (0,0), (-1,0), 12),
-    ("BOTTOMPADDING", (0,0), (-1,0), 12),
-    ("GRID", (0,0), (-1,-1), 1, colors.black),
+    ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+    ("TEXTCOLOR",  (0, 0), (-1, 0), colors.whitesmoke),
+    ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
+    ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
+    ("FONTSIZE",   (0, 0), (-1, 0), 12),
+    ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+    ("GRID", (0, 0), (-1, -1), 1, colors.black),
 ]))
+story.append(table)
 
-c.save()
+# `doc.build(story)` lays out and writes the PDF — Platypus takes care of
+# placing the Table on the canvas. With a raw `canvas.Canvas` you must call
+# `table.wrapOn(c, w, h)` then `table.drawOn(c, x, y)` yourself.
+doc.build(story)
 ```
 
 **Example: Fill PDF form (Node.js)**
@@ -422,13 +426,12 @@ with pdfplumber.open("doc.pdf") as pdf:
     for page_num, page in enumerate(pdf.pages, 1):
         print(f"# Page {page_num}\n")
         
-        # Extract blocks (preserves hierarchy)
-        blocks = page.extract_blocks()
-        for block in blocks:
-            if block.get('x0') < 100:  # Left margin = heading
-                print(f"## {block['text']}\n")
+        # Group words into visual lines and treat left-margin lines as headings.
+        for line in page.extract_text_lines():
+            if line["x0"] < 100:  # Left margin = heading
+                print(f"## {line['text']}\n")
             else:
-                print(f"{block['text']}\n")
+                print(f"{line['text']}\n")
 ```
 
 ### Convert PDF to images then OCR
@@ -470,7 +473,7 @@ for i, img in enumerate(images):
 2. **Choose tool** → Use quick-reference table above
 3. **Read sub-doc** → Check `extraction.md`, `creation.md`, or `transformation.md` for detailed examples
 4. **Execute** → Write minimal, focused script for the task
-5. **Output** → Save results to `/mnt/user-data/outputs/` if file-based
+5. **Output** → Save results to the current working directory (workdir). Use relative paths like `./report.pdf`; do not hard-code `/output/` or any other absolute path — the agent runs in a per-session workdir that already exists.
 6. **Report** → Summary of what was done + file location/size
 
 **For complex requests** (multi-step):

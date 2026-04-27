@@ -207,7 +207,7 @@ slide2.addText([
 });
 
 // Save
-pptx.writeFile({ fileName: "/output/presentation.pptx" })
+pptx.writeFile({ fileName: "presentation.pptx" })
   .then(() => console.log("✓ Presentation created"))
   .catch(err => console.error("Error:", err));
 ```
@@ -247,7 +247,7 @@ p.font.color.rgb = RGBColor(0x1B, 0x3A, 0x5C)
 p.alignment = PP_ALIGN.CENTER
 
 # Save
-prs.save("/output/modified.pptx")
+prs.save("modified.pptx")
 print("✓ Presentation updated")
 ```
 
@@ -344,7 +344,7 @@ def generate_previews(pptx_path, output_dir, dpi=200):
 2. **Choose tool** → Use quick-reference table above
 3. **Read sub-doc** → Check `creation.md`, `editing.md`, or `extraction.md` for detailed examples
 4. **Execute** → Write minimal, focused script for the task
-5. **Output** → Save results to `/mnt/user-data/outputs/` if file-based
+5. **Output** → Save results to the current working directory (workdir). Use relative paths like `./presentation.pptx`; do not hard-code `/output/` or any other absolute path — the agent runs in a per-session workdir that already exists.
 6. **Report** → Summary of what was done + file location/size
 
 **For complex requests** (multi-step):

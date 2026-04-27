@@ -456,7 +456,7 @@ s5.addText("contact@startup.com | startup.com", {
 });
 
 // SAVE
-pptx.writeFile({ fileName: "/output/pitch_deck.pptx" })
+pptx.writeFile({ fileName: "pitch_deck.pptx" })
   .then(() => console.log("✓ Pitch deck created"))
   .catch(err => console.error("Error:", err));
 ```
@@ -522,12 +522,12 @@ def add_title_slide(prs, title, subtitle="", author="", date_str=""):
     # Subtitle
     if subtitle:
         txBox2 = slide.shapes.add_textbox(Inches(1), Inches(3.8), Inches(11.333), Inches(0.8))
-    tf2 = txBox2.text_frame
-    p2 = tf2.paragraphs[0]
-    p2.text = subtitle
-    p2.font.size = Pt(20)
-    p2.font.color.rgb = Theme.LIGHT
-    p2.alignment = PP_ALIGN.CENTER
+        tf2 = txBox2.text_frame
+        p2 = tf2.paragraphs[0]
+        p2.text = subtitle
+        p2.font.size = Pt(20)
+        p2.font.color.rgb = Theme.LIGHT
+        p2.alignment = PP_ALIGN.CENTER
     
     # Author & Date footer
     if author or date_str:
@@ -585,7 +585,7 @@ def add_content_slide(prs, title, bullets):
 
 ### Save Presentation
 ```python
-prs.save("/output/presentation.pptx")
+prs.save("presentation.pptx")
 print("✓ Presentation created")
 ```
 

@@ -426,10 +426,10 @@ class ExecutorAgent:
             "plain text, always invoke a tool):\n"
             "1. bash(reason, command) — run a bash command.\n"
             "2. python(reason, code) — run Python code.\n"
-            "3. javascript (reason, code) — run Javascript code.\n"
+            "3. javascript(reason, code) — run Javascript code.\n"
             "4. end_task(success, report) — finish the task with a final report.\n\n"
             "Rules:\n"
-            "- The `reason` argument is REQUIRED on `bash` and `python`. Keep "
+            "- The `reason` argument is REQUIRED on `bash`, `python`, and `javascript`. Keep "
             "  it short (one sentence) and explain WHY you are running this "
             "  step. It is shown back to the orchestrating agent as a "
             "  progress update.\n"
@@ -680,9 +680,9 @@ class ExecutorAgent:
                     end_task_called = True
                     break
 
-                if tool_name not in {"bash", "python"}:
+                if tool_name not in {"bash", "python", "javascript"}:
                     messages.append(ToolMessage(
-                        content=f"Tool '{tool_name}' is not available. Use bash, python, or end_task.",
+                        content=f"Tool '{tool_name}' is not available. Use bash, python, javascript, or end_task.",
                         tool_call_id=tc_id,
                         name=tool_name,
                     ))
