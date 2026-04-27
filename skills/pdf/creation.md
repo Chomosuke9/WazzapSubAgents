@@ -5,7 +5,7 @@
 ### Basic Canvas Setup
 ```python
 from reportlab.lib.pagesizes import letter, A4, landscape
-from reportlab.lib.units import inch, cm
+from reportlab.lib.units import inch, cm, mm
 from reportlab.pdfgen import canvas
 
 # Letter size (default)
@@ -14,6 +14,7 @@ width, height = letter  # (612, 792) in points
 
 # A4 size
 c = canvas.Canvas("document.pdf", pagesize=A4)
+width, height = A4  # (595.27, 841.89) in points
 
 # Landscape
 c = canvas.Canvas("wide.pdf", pagesize=landscape(letter))
@@ -48,6 +49,18 @@ for line in text_lines:
     c.drawString(1*inch, y, line)
     y -= 0.25*inch
 
+# Text wrapping with textobject
+from reportlab.lib.colors import black
+text_obj = c.beginText(1*inch, height - 3*inch)
+text_obj.setFont("Helvetica", 11)
+text_obj.setFillColor(black)
+text_obj.textLines("""
+This is a multi-line paragraph.
+It wraps automatically when you use textLines().
+Each line is separated by a newline character.
+""")
+c.drawText(text_obj)
+
 c.save()
 ```
 
@@ -75,8 +88,9 @@ c.setLineWidth(2)
 c.setStrokeColor(green)
 c.line(1*inch, 3*inch, 4*inch, 3*inch)
 
-# Arc (pie slice)
-c.arc(1*inch, 1.5*inch, 1*inch, 45, 180)
+# Rounded rectangle
+c.setFillColor(HexColor("#4472C4"))
+c.roundRect(1*inch, 1*inch, 3*inch, 1*inch, 0.2*inch, fill=1, stroke=0)
 
 c.save()
 ```
@@ -90,12 +104,114 @@ from reportlab.lib.pagesizes import letter
 c = canvas.Canvas("with_image.pdf", pagesize=letter)
 width, height = letter
 
-# Insert image
+# Insert image (PNG, JPG supported)
 c.drawImage("logo.png", 1*inch, height - 1.5*inch, width=2*inch, height=1*inch)
 
-c.drawString(1*inch, height - 2.5*inch, "Image inserted above")
+# Image with preserveAspectRatio
+c.drawImage("photo.jpg", 1*inch, height - 5*inch, 
+            width=4*inch, height=3*inch,
+            preserveAspectRatio=True, anchor='c')
 
 c.save()
+```
+
+### Multi-page Documents
+```python
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
+
+c = canvas.Canvas("multipage.pdf", pagesize=letter)
+width, height = letter
+
+# Page 1
+c.setFont("Helvetica-Bold", 20)
+c.drawString(1*inch, height - 1*inch, "Page 1 - Cover")
+c.showPage()  # Finish page 1, start page 2
+
+# Page 2
+c.setFont("Helvetica", 14)
+c.drawString(1*inch, height - 1*inch, "Page 2 - Content")
+c.showPage()  # Finish page 2, start page 3
+
+# Page 3
+c.drawString(1*inch, height - 1*inch, "Page 3 - Final")
+c.showPage()
+
+c.save()
+```
+
+---
+
+## Platypus Flow-based Layout (reportlab)
+
+### Simple Document with Paragraphs
+```python
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+
+doc = SimpleDocTemplate("flow_doc.pdf", pagesize=letter)
+styles = getSampleStyleSheet()
+story = []
+
+# Title
+story.append(Paragraph("Document Title", styles["Title"]))
+story.append(Spacer(1, 0.3*inch))
+
+# Body text
+story.append(Paragraph(
+    "This is a paragraph with <b>bold</b> and <i>italic</i> text. "
+    "Reportlab supports inline HTML-like markup.",
+    styles["Normal"]
+))
+story.append(Spacer(1, 0.2*inch))
+
+# New page
+story.append(PageBreak())
+story.append(Paragraph("Page 2 Content", styles["Heading1"]))
+
+doc.build(story)
+```
+
+### Custom Paragraph Styles
+```python
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.colors import HexColor
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_RIGHT
+
+styles = getSampleStyleSheet()
+
+# Custom title
+custom_title = ParagraphStyle(
+    "CustomTitle",
+    parent=styles["Title"],
+    fontSize=28,
+    textColor=HexColor("#1B3A5C"),
+    spaceAfter=12,
+    alignment=TA_CENTER,
+)
+
+# Custom body
+custom_body = ParagraphStyle(
+    "CustomBody",
+    parent=styles["Normal"],
+    fontSize=11,
+    leading=16,
+    textColor=HexColor("#333333"),
+    alignment=TA_JUSTIFY,
+    spaceAfter=8,
+)
+
+# Custom footer
+custom_footer = ParagraphStyle(
+    "CustomFooter",
+    parent=styles["Normal"],
+    fontSize=8,
+    textColor=HexColor("#999999"),
+    alignment=TA_CENTER,
+)
 ```
 
 ---
@@ -105,12 +221,11 @@ c.save()
 ### Simple Table
 ```python
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
 
 doc = SimpleDocTemplate("table.pdf", pagesize=letter)
-styles = getSampleStyleSheet()
 
 # Data as list of lists
 data = [
@@ -140,19 +255,25 @@ story = [table]
 doc.build(story)
 ```
 
-### Dynamic Table from CSV
+### Dynamic Table from CSV/Excel
 ```python
 import csv
+import pandas as pd
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.lib import colors
+from reportlab.lib.units import inch
 
 # Read CSV
 with open("data.csv") as f:
     reader = csv.reader(f)
     data = list(reader)
 
-doc = SimpleDocTemplate("from_csv.pdf", pagesize=letter)
+# OR read Excel
+df = pd.read_excel("data.xlsx")
+data = [df.columns.tolist()] + df.values.tolist()
+
+doc = SimpleDocTemplate("from_data.pdf", pagesize=letter)
 
 # Auto-calculate column widths
 col_widths = [2*inch] * len(data[0])
@@ -169,6 +290,43 @@ story = [table]
 doc.build(story)
 ```
 
+### Advanced Table Styling
+```python
+from reportlab.lib import colors
+
+table.setStyle(TableStyle([
+    # Header styling
+    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2C3E50")),
+    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+    ("FONTSIZE", (0, 0), (-1, 0), 12),
+    ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+    ("TOPPADDING", (0, 0), (-1, 0), 12),
+    
+    # Alternating row colors
+    ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#ECF0F1")),
+    ("BACKGROUND", (0, 2), (-1, 2), colors.white),
+    ("BACKGROUND", (0, 3), (-1, 3), colors.HexColor("#ECF0F1")),
+    
+    # Last row (total) styling
+    ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#3498DB")),
+    ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+    ("LINEABOVE", (0, -1), (-1, -1), 2, colors.HexColor("#2C3E50")),
+    
+    # Grid
+    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BDC3C7")),
+    ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    
+    # Cell padding
+    ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+]))
+```
+
 ---
 
 ## Invoice Template Example
@@ -177,7 +335,6 @@ doc.build(story)
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from reportlab.pdfgen import canvas
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Spacer, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from datetime import datetime
@@ -279,6 +436,83 @@ create_invoice("invoice.pdf", {
 
 ---
 
+## Certificate Template Example
+
+```python
+from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.units import inch
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas
+from reportlab.lib.enums import TA_CENTER
+
+def create_certificate(filename, data):
+    """
+    data = {
+        "recipient": "John Doe",
+        "course": "Advanced Python Programming",
+        "date": "2024-06-15",
+        "issuer": "Tech Academy",
+        "signer": "Dr. Jane Smith"
+    }
+    """
+    c = canvas.Canvas(filename, pagesize=landscape(letter))
+    width, height = landscape(letter)
+    
+    # Border
+    c.setStrokeColor(colors.HexColor("#1B3A5C"))
+    c.setLineWidth(3)
+    c.rect(0.5*inch, 0.5*inch, width - 1*inch, height - 1*inch)
+    
+    # Inner border
+    c.setStrokeColor(colors.HexColor("#C9A84C"))
+    c.setLineWidth(1)
+    c.rect(0.6*inch, 0.6*inch, width - 1.2*inch, height - 1.2*inch)
+    
+    # Title
+    c.setFont("Helvetica-Bold", 36)
+    c.setFillColor(colors.HexColor("#1B3A5C"))
+    c.drawCentredString(width/2, height - 1.5*inch, "CERTIFICATE")
+    
+    c.setFont("Helvetica", 16)
+    c.setFillColor(colors.HexColor("#666666"))
+    c.drawCentredString(width/2, height - 2*inch, "OF COMPLETION")
+    
+    # Recipient
+    c.setFont("Helvetica-Bold", 28)
+    c.setFillColor(colors.HexColor("#C9A84C"))
+    c.drawCentredString(width/2, height - 3*inch, data["recipient"])
+    
+    # Description
+    c.setFont("Helvetica", 14)
+    c.setFillColor(colors.HexColor("#333333"))
+    c.drawCentredString(width/2, height - 3.7*inch, 
+                        f'Has successfully completed the course')
+    c.drawCentredString(width/2, height - 4.1*inch, data["course"])
+    
+    # Date & Signer
+    c.setFont("Helvetica", 12)
+    c.drawString(1.5*inch, 1.5*inch, f"Date: {data['date']}")
+    c.drawRightString(width - 1.5*inch, 1.5*inch, data["signer"])
+    c.drawRightString(width - 1.5*inch, 1.2*inch, data["issuer"])
+    
+    # Signature line
+    c.setStrokeColor(colors.HexColor("#333333"))
+    c.setLineWidth(0.5)
+    c.line(width - 4*inch, 1.6*inch, width - 1.5*inch, 1.6*inch)
+    
+    c.save()
+
+create_certificate("certificate.pdf", {
+    "recipient": "John Doe",
+    "course": "Advanced Python Programming",
+    "date": "2024-06-15",
+    "issuer": "Tech Academy",
+    "signer": "Dr. Jane Smith"
+})
+```
+
+---
+
 ## Form Filling (Node.js - pdf-lib)
 
 ### Fill AcroForm Fields
@@ -318,6 +552,32 @@ async function fillForm() {
 }
 
 fillForm();
+```
+
+### List All Form Fields
+```javascript
+const { PDFDocument } = require('pdf-lib');
+const fs = require('fs');
+
+async function listFormFields() {
+  const pdfBytes = fs.readFileSync('form.pdf');
+  const pdfDoc = await PDFDocument.load(pdfBytes);
+  
+  try {
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+    
+    fields.forEach(field => {
+      const type = field.constructor.name;
+      const name = field.getName();
+      console.log(`${type}: ${name}`);
+    });
+  } catch (e) {
+    console.log('No form fields found in this PDF');
+  }
+}
+
+listFormFields();
 ```
 
 ### Programmatically Create Form
@@ -396,6 +656,24 @@ print(f"✓ Created {len(df)} PDFs")
 
 ---
 
+## Converting Other Formats to PDF (libreoffice)
+
+```bash
+# DOCX to PDF
+libreoffice --headless --convert-to pdf document.docx --outdir output/
+
+# XLSX to PDF
+libreoffice --headless --convert-to pdf spreadsheet.xlsx --outdir output/
+
+# PPTX to PDF
+libreoffice --headless --convert-to pdf presentation.pptx --outdir output/
+
+# Batch convert all DOCX files
+libreoffice --headless --convert-to pdf *.docx --outdir output/
+```
+
+---
+
 ## Troubleshooting
 
 | Problem | Cause | Solution |
@@ -406,3 +684,5 @@ print(f"✓ Created {len(df)} PDFs")
 | Blank PDF created | `doc.build([])` with empty story | Ensure items added before `build()` |
 | Form fields not interactive | Missing `form.flatten()` call | Don't flatten if you want users to edit |
 | Performance slow (100+ PDFs) | Serial generation | Use multiprocessing or batch at OS level |
+| Unicode characters missing | Font doesn't support chars | Register a Unicode-capable TTF font |
+| Custom font not found | Font not registered | Use `reportlab.pdfbase.pdfmetrics.registerFont()` |

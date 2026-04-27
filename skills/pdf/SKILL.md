@@ -1,6 +1,11 @@
 ---
 name: pdf-agent
-description: Handle PDF document operations—read, extract, transform, and create. Use this skill whenever the user needs to merge/split/rotate PDFs, extract text with layout awareness, perform OCR on scanned documents, extract tables/images, fill forms, or generate PDFs from data. Covers text extraction, batch transformations, metadata handling, and visual document generation.
+description: |
+  Handle PDF document operations—read, extract, transform, and create. 
+  Use this skill whenever the user needs to merge/split/rotate PDFs, extract text with layout awareness, 
+  perform OCR on scanned documents, extract tables/images, fill forms, or generate PDFs from data. 
+  Covers text extraction, batch transformations, metadata handling, and visual document generation.
+  Libraries: pypdf, pdfplumber, reportlab, pytesseract, pdf2image, pdf-lib (Node), qpdf, poppler-utils.
 ---
 
 # PDF Document Agent
@@ -14,11 +19,52 @@ Sub-agent skill for comprehensive PDF manipulation: reading, extraction, transfo
 | Merge/split/rotate | `pypdf` | `qpdf` | Batch ops, preserve layout |
 | Text extraction | `pdfplumber` | `pypdf` | Layout matters (tables, columns) |
 | OCR (scans) | `pytesseract` + `pdf2image` | `poppler` | Scanned PDFs, poor image quality |
-| Extract tables | `pdfplumber` | `camelot` | Structured data, complex layouts |
+| Extract tables | `pdfplumber` | — | Structured data, complex layouts |
 | Extract images | `pdfplumber`, `pypdf` | `pdf2image` | Embedded images, page rasterization |
 | Create/generate | `reportlab` | `pdf-lib` (Node) | Programmatic PDFs, invoices, certificates |
 | Fill forms | `pdf-lib` (Node) | `pypdf` | AcroForm fields |
+| Metadata | `pdfplumber` | `pypdf` | Read/write document metadata |
 | System-level ops | `qpdf`, `poppler-utils` | — | No Python overhead, large batch |
+| PDF to image | `pdf2image` | `poppler-utils` | Preview, rasterize pages |
+
+---
+
+## Library Overview
+
+### Python Libraries
+
+| Library | Purpose | Key Features |
+|---------|---------|--------------|
+| `pypdf` | Merge, split, rotate, metadata | Pure Python, fast, no external deps |
+| `pdfplumber` | Text & table extraction | Layout-aware, preserves columns/tables |
+| `reportlab` | PDF creation & generation | Canvas drawing, Platypus flow, tables, charts |
+| `pytesseract` | OCR on scanned PDFs | Tesseract wrapper, multi-language |
+| `pdf2image` | PDF to image conversion | Poppler-based, DPI control, PNG/JPG output |
+
+### Node.js Libraries
+
+| Library | Purpose | Key Features |
+|---------|---------|--------------|
+| `pdf-lib` | Form filling, lightweight manipulation | AcroForm fields, create/modify PDFs |
+
+### System Tools (CLI)
+
+| Tool | Purpose | Key Features |
+|------|---------|--------------|
+| `qpdf` | Transformation & compression | Fast, batch ops, encryption, linearization |
+| `poppler-utils` | Text extraction & image conversion | `pdftotext`, `pdftoppm`, `pdfimages` |
+
+---
+
+## Detailed Documentation
+
+This skill is organized into sub-documents for focused reference:
+
+- **[extraction.md](/skills/pdf/extraction.md)** — Text extraction, OCR, table extraction, image extraction, metadata
+- **[creation.md](/skills/pdf/creation.md)** — PDF generation with reportlab, canvas drawing, tables, form filling with pdf-lib
+- **[transformation.md](/skills/pdf/transformation.md)** — Merge, split, rotate, compress, combined operations
+
+Read the relevant sub-document before implementing a solution.
 
 ---
 
@@ -85,7 +131,7 @@ with pdfplumber.open("doc.pdf") as pdf:
 
 **Example: Merge & rotate**
 ```python
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 writer = PdfWriter()
 
@@ -249,6 +295,36 @@ fillForm();
 
 ---
 
+### 5. PDF TO IMAGE CONVERSION
+
+**Use `pdf2image` (Python)** for high-quality rasterization:
+```python
+from pdf2image import convert_from_path
+
+# Convert all pages to PNG
+images = convert_from_path("document.pdf", dpi=300)
+for i, img in enumerate(images):
+    img.save(f"page_{i+1}.png", "PNG")
+
+# Convert single page
+images = convert_from_path("doc.pdf", first_page=1, last_page=1, dpi=200)
+images[0].save("cover.png")
+```
+
+**Use `poppler-utils` (CLI)** for quick conversions:
+```bash
+# Convert to PNG images
+pdftoppm -png -r 300 document.pdf output_page
+
+# Convert to JPEG
+pdftoppm -jpeg -r 200 document.pdf output_page
+
+# Single page
+pdftoppm -png -r 300 -f 1 -l 1 document.pdf cover
+```
+
+---
+
 ## System Tools Reference
 
 ### qpdf (CLI)
@@ -266,6 +342,12 @@ qpdf input.pdf --rotate=90:1-5 -- output.pdf  # Rotate pages 1-5
 
 # Decrypt (remove password)
 qpdf --password=secret input.pdf output.pdf
+
+# Compress
+qpdf --compress-streams=y input.pdf output.pdf
+
+# Linearize (web optimization)
+qpdf --linearize input.pdf output.pdf
 ```
 
 ### poppler-utils
@@ -280,6 +362,9 @@ pdftoppm document.pdf page -png  # Outputs page-1.png, page-2.png, ...
 
 # Extract images
 pdfimages document.pdf image  # Outputs image-*.png
+
+# Get PDF info
+pdfinfo document.pdf
 ```
 
 ---
@@ -346,6 +431,21 @@ with pdfplumber.open("doc.pdf") as pdf:
                 print(f"{block['text']}\n")
 ```
 
+### Convert PDF to images then OCR
+```python
+from pdf2image import convert_from_path
+import pytesseract
+
+# Step 1: Convert to images at high DPI
+images = convert_from_path("scan.pdf", dpi=300, fmt="png")
+
+# Step 2: OCR each image
+for i, img in enumerate(images):
+    text = pytesseract.image_to_string(img, lang='eng+ind')
+    with open(f"page_{i+1}_ocr.txt", "w") as f:
+        f.write(text)
+```
+
 ---
 
 ## Error Handling Checklist
@@ -353,21 +453,25 @@ with pdfplumber.open("doc.pdf") as pdf:
 | Scenario | Error | Solution |
 |----------|-------|----------|
 | Corrupted PDF | `pypdf.errors.PdfReadError` | Use `qpdf --fix-qdf` to repair |
-| Encrypted/password-protected | `PdfReadError: File is encrypted` | Pass `password=""` to PdfReader |
+| Encrypted/password-protected | `PdfReadError: File is encrypted` | Pass `password=""` to PdfReader or use `qpdf --password=` |
 | OCR fails (no tesseract) | `pytesseract.TesseractNotFoundError` | Install system `tesseract-ocr` package |
 | Poor OCR quality | Low accuracy | Increase DPI in `convert_from_path(dpi=300+)` |
 | Huge PDF (slow merge) | Timeout | Use `qpdf` CLI instead of `pypdf` |
 | Tables not detected | Empty result | Check `extraction_settings` in `pdfplumber` or use manual coordinates |
+| pdf2image fails | `PDFInfoNotInstalledError` | Ensure `poppler-utils` is installed |
+| Image not found in reportlab | `IOError` | Use absolute paths or verify file exists |
+| Text cut off in reportlab | — | Check coords: `y = height - distance_from_top` |
 
 ---
 
 ## Recommended Flow
 
-1. **User request** → Identify task category (extract, transform, create, OCR)
+1. **User request** → Identify task category (extract, transform, create, OCR, convert)
 2. **Choose tool** → Use quick-reference table above
-3. **Execute** → Write minimal, focused script for the task
-4. **Output** → Save results to `/mnt/user-data/outputs/` if file-based
-5. **Report** → Summary of what was done + file location/size
+3. **Read sub-doc** → Check `extraction.md`, `creation.md`, or `transformation.md` for detailed examples
+4. **Execute** → Write minimal, focused script for the task
+5. **Output** → Save results to `/mnt/user-data/outputs/` if file-based
+6. **Report** → Summary of what was done + file location/size
 
 **For complex requests** (multi-step):
 - Break into sequential operations
@@ -383,3 +487,6 @@ with pdfplumber.open("doc.pdf") as pdf:
 - **pytesseract** quality depends on DPI and image preprocessing—experiment with 200-300 DPI for balance
 - **qpdf** compression (`--compress-streams`) can reduce file size 20-50% with no quality loss
 - For **very large PDFs (>1GB)**, process page-by-page in loops rather than loading entire file
+- **pdf2image** requires `poppler-utils` to be installed on the system
+- **pdf-lib** (Node.js) is best for form filling; `pypdf` can also handle basic form operations
+- Use `poppler-utils` CLI tools when you need quick, no-code PDF operations
