@@ -10,6 +10,7 @@ from src.config import config
 from src.container_client import ContainerClient
 from src.logger import get_logger
 from src.session_manager import SessionManager
+from src.prompts import EXECUTOR_SYSTEM_PROMPT
 
 logger = get_logger(__name__)
 
@@ -411,47 +412,11 @@ class ExecutorAgent:
 
         return accepted
 
-    def _build_system_prompt(self, instruction: str, input_files: List[str], workdir: str) -> str:
+    def _build_system_prompt(self, input_files: List[str], workdir: str) -> str:
         files_str = "\n".join(input_files) if input_files else "None"
-        return (
-            "You are an executor agent. Your job is to fulfill the user's "
-            "instruction by calling the provided tools.\n\n"
-            "Technical Documentation:\n"
-            "- If you need help with specific file formats (DOCX, PDF, XLSX, PPTX, etc.), "
-            "specialized documentation and code examples are available in `/skills/`. "
-            "You can explore this directory using `bash` (e.g., `ls -R /skills/`) and "
-            "read the `SKILL.md` files (e.g., `cat /skills/docx/SKILL.md`) to learn "
-            "best practices and available libraries.\n\n"
-            "Tools available (call exactly one per turn — never reply with "
-            "plain text, always invoke a tool):\n"
-            "1. bash(reason, command) — run a bash command.\n"
-            "2. python(reason, code) — run Python code.\n"
-            "3. javascript(reason, code) — run Javascript code.\n"
-            "4. end_task(success, report) — finish the task with a final report.\n\n"
-            "Rules:\n"
-            "- The `reason` argument is REQUIRED on `bash`, `python`, and `javascript`. Keep "
-            "  it short (one sentence) and explain WHY you are running this "
-            "  step. It is shown back to the orchestrating agent as a "
-            "  progress update.\n"
-            "- If a tool returns an error, decide whether to retry, pivot, or fail.\n"
-            "- Do not ask the user questions. Decide and act.\n"
-            "- Input files are at the EXACT paths provided below — they have "
-            "already been staged inside the `input/` directory for you. Use those paths "
-            "verbatim in `bash`/`python`/`javascript`. Do NOT search the filesystem for "
-            "alternative locations and do NOT invent new paths.\n"
-            "- Write output files anywhere inside the workdir.\n"
-            "- When the instruction is fully resolved (or cannot be done), "
-            "call `end_task` exactly once and stop.\n"
-            "- `end_task` accepts an OPTIONAL `output_files` list. Only "
-            "include paths of files that are deliverables for the user "
-            "(e.g. an extracted `report.pdf`, a generated chart). Skip the "
-            "argument entirely (or pass `[]`) for tasks that don't produce "
-            "a file (e.g. answering a question, doing a calculation). NEVER "
-            "list scratch / temp / cache / log / intermediate files — the "
-            "user only wants the final deliverable, not your workspace.\n\n"
-            f"Workdir: {workdir}\n"
-            f"Input files:\n{files_str}\n\n"
-            f"Instruction: {instruction}"
+        return EXECUTOR_SYSTEM_PROMPT.format(
+            workdir=workdir,
+            files_str=files_str
         )
 
     # ------------------------------------------------------------------
@@ -612,8 +577,8 @@ class ExecutorAgent:
         self.logger.info("Agent loop starting", extra={"session_id": session_id})
 
         messages: List[Any] = [
-            SystemMessage(content=self._build_system_prompt(instruction, input_files, workdir)),
-            HumanMessage(content="Begin executing the instruction."),
+            SystemMessage(content=self._build_system_prompt(input_files, workdir)),
+            HumanMessage(content=instruction),
         ]
 
         max_iterations = 50
