@@ -429,7 +429,7 @@ class ExecutorAgent:
             "3. javascript (reason, code) — run Javascript code.\n"
             "4. end_task(success, report) — finish the task with a final report.\n\n"
             "Rules:\n"
-            "- The `reason` argument is REQUIRED on `bash` and `python`. Keep "
+            "- The `reason` argument is REQUIRED on `bash`, `python`, and `javascript`. Keep "
             "  it short (one sentence) and explain WHY you are running this "
             "  step. It is shown back to the orchestrating agent as a "
             "  progress update.\n"

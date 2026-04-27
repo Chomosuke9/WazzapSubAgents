@@ -522,12 +522,12 @@ def add_title_slide(prs, title, subtitle="", author="", date_str=""):
     # Subtitle
     if subtitle:
         txBox2 = slide.shapes.add_textbox(Inches(1), Inches(3.8), Inches(11.333), Inches(0.8))
-    tf2 = txBox2.text_frame
-    p2 = tf2.paragraphs[0]
-    p2.text = subtitle
-    p2.font.size = Pt(20)
-    p2.font.color.rgb = Theme.LIGHT
-    p2.alignment = PP_ALIGN.CENTER
+        tf2 = txBox2.text_frame
+        p2 = tf2.paragraphs[0]
+        p2.text = subtitle
+        p2.font.size = Pt(20)
+        p2.font.color.rgb = Theme.LIGHT
+        p2.alignment = PP_ALIGN.CENTER
     
     # Author & Date footer
     if author or date_str:
