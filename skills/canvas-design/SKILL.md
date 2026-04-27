@@ -5,7 +5,6 @@ description: |
   crafted and museum-quality. Use this skill when the user asks for a poster, piece
   of art, design, or other static visual artifact. Output only `.md`, `.pdf`, and
   `.png` files. Never copy existing artists' work.
-license: Complete terms in LICENSE.txt
 ---
 
 # Canvas Design Agent

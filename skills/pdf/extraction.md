@@ -203,7 +203,7 @@ for page_idx, page in enumerate(reader.pages):
     # `page.images` is the supported pypdf API and yields ImageFile objects
     # with .name, .data (raw bytes) and .image (PIL image).
     for img_idx, image in enumerate(page.images):
-        out_path = f"extracted_p{page_idx+1}_{img_idx+1}_{image.name}"
+        out_path = f"extracted_p{page_idx+1}_{img_idx+1}_{image.name or 'img.bin'}"
         with open(out_path, "wb") as f:
             f.write(image.data)
 ```

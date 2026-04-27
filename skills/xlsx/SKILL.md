@@ -119,7 +119,8 @@ ws.append(header)
 header_font   = Font(bold=True, color="FFFFFF")
 header_fill   = PatternFill("solid", fgColor="1B3A5C")
 center        = Alignment(horizontal="center", vertical="center")
-thin_border   = Border(*(Side(style="thin", color="BFBFBF"),) * 4)
+_side         = Side(style="thin", color="BFBFBF")
+thin_border   = Border(left=_side, right=_side, top=_side, bottom=_side)
 
 for col_idx, _ in enumerate(header, start=1):
     cell = ws.cell(row=1, column=col_idx)

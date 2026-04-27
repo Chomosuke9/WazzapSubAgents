@@ -79,16 +79,16 @@ sidecar.
 
 ## 2. Request lifecycle
 
-The entry point is `POST /execute` on the main service (`src/app.py:36-82`):
+The entry point is `POST /execute` on the main service (`execute()` in `src/app.py`):
 
 1. **Validate** `session_id` + `instruction`. `session_id` is sanitised so it
    can't traverse outside `WORKDIR_BASE` when used as a directory name
-   (`src/session_manager.py:56-70`, mirrored in `src/executor_server.py:25-46`).
+   (`SessionManager.get_or_create()` in `src/session_manager.py`, mirrored in `_resolve_workdir()` in `src/executor_server.py`).
 2. **Get or create a session.** Each session gets:
    - a dedicated workdir at `${WORKDIR_BASE}/<session_id>/`;
    - a `Session` object tracking `last_activity`, `status`, `result`,
      `callback_url`, `progress_webhook`, `progress_logs`
-     (`src/session_manager.py:15-25`).
+     (`Session` dataclass in `src/session_manager.py`).
 3. **Stage input files.** Whatever paths the bridge passed in `input_files` are
    **copied** into `<workdir>/input/<basename>`
    (`src/input_staging.py`). This is the single fix for a whole class of
@@ -110,7 +110,7 @@ When the agent loop finishes:
 
 Sessions that have been `completed` and idle for more than
 `SESSION_IDLE_TIMEOUT` seconds (default 600) are cleaned up by a background
-thread (`src/session_manager.py:183-194`) — the workdir is deleted with
+thread (`SessionManager._cleanup_loop()` in `src/session_manager.py`) — the workdir is deleted with
 `shutil.rmtree`.
 
 ---
@@ -148,7 +148,7 @@ The loop also has guard-rails:
   webhook always has something human-readable to surface in WhatsApp.
 
 The system prompt constructed by `_build_system_prompt`
-(`src/agent.py:414-455`) tells the model:
+(`src/agent.py`) tells the model:
 
 - where `/skills/` lives and how to read it;
 - that input files are already staged at the listed paths — don't search the
@@ -158,7 +158,7 @@ The system prompt constructed by `_build_system_prompt`
   not scratch or intermediate files.
 
 When `end_task` fires, `_resolve_declared_output_files`
-(`src/agent.py:350-412`) validates the declared paths: each must (a) exist as
+(`src/agent.py`) validates the declared paths: each must (a) exist as
 a regular file and (b) live strictly inside the workdir. Anything else is
 dropped with a logged warning.
 
@@ -226,7 +226,7 @@ path.
 
 `./skills/` is a curated directory of **LLM-consumable reference
 documentation** for common document-processing tasks. It is mounted **read-only**
-into the sidecar at `/skills/` (see `src/docker_manager.py:103-114` for native
+into the sidecar at `/skills/` (see the volume-mounting block in `src/docker_manager.py` for native
 mode; the same mount is declared in `docker-compose.yml`).
 
 The agent's system prompt explicitly tells the model:
