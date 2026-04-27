@@ -67,7 +67,7 @@ services:
       # read input_files staged by the bridge AND write outputs to a
       # path the bridge can read after the task completes.
       - ${SUBAGENT_STORAGE_DIR:-/storage}:/storage:rw
-      - ./skills:/app/skills:ro # ← read-only skills
+      - ./skills:/skills:ro # ← read-only skills
     networks:
       - executor-net
     restart: unless-stopped

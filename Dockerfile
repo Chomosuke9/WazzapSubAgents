@@ -103,7 +103,7 @@ ENV PATH=/root/.local/bin:$PATH
 # Copy application code
 COPY src/ ./src/
 COPY main.py .
-COPY skills/ ./skills/
+COPY skills/ /skills/
 
 EXPOSE 5000 5001
 

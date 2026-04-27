@@ -107,7 +107,7 @@ class DockerManager:
             main_py = os.path.join(project_root, "main.py")
 
             if os.path.isdir(skills_dir):
-                volumes[skills_dir] = {"bind": "/app/skills", "mode": "ro"}
+                volumes[skills_dir] = {"bind": "/skills", "mode": "ro"}
             if os.path.isdir(src_dir):
                 volumes[src_dir] = {"bind": "/app/src", "mode": "ro"}
             if os.path.isfile(main_py):
