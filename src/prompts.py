@@ -31,4 +31,6 @@ Supported Extensions:
 
 Workdir: {workdir}
 Input files:
-{files_str}"""
+{files_str}
+
+Note: If you find pairs of files with the same number (e.g., `file1.jpg` and `user_message1.txt`), the `.txt` file contains the user-provided caption or description for that specific file. Use this information to understand the context of the associated file."""
