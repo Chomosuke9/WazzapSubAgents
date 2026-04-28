@@ -250,11 +250,13 @@ class ExecutorAgent:
                 "session_id": session_id,
                 "reason": (reason or "")[:200],
                 "code": code[:200],
+                "returncode": result.get("returncode"),
             },
         )
         if "error" in result:
             return f"ERROR:\n{result['error']}"
-        return f"OUTPUT:\n{result.get('output', '')}"
+        output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
+        return output
 
     def _javascript_tool(self, reason: str, code: str, session_id: str) -> str:
         self.session_manager.append_progress(session_id, {

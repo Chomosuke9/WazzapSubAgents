@@ -1,21 +1,55 @@
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import requests
 
 from src.logger import get_logger
 
+if TYPE_CHECKING:
+    from src.docker_manager import DockerManager
+
 logger = get_logger(__name__)
 
 
 class ContainerClient:
-    def __init__(self, base_url: str, timeout: int = 300, max_retries: int = 3):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: int = 300,
+        max_retries: int = 3,
+        docker_mgr: Optional["DockerManager"] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self.docker_mgr = docker_mgr
+
+    def _restart_container(self) -> None:
+        """Attempt to restart the executor container via DockerManager.
+
+        This is a best-effort recovery: if the container process has crashed
+        (e.g. OOM-killed), we try to bring it back before retrying the
+        request.  The restart itself may fail (e.g. Docker daemon down) and
+        that is acceptable — the caller will simply get a connection error.
+        """
+        if self.docker_mgr is None:
+            return
+        try:
+            logger.warning("Container unreachable, attempting restart...")
+            if not self.docker_mgr.container_running():
+                self.docker_mgr.start_container()
+                self.docker_mgr.wait_for_container_ready(timeout=30)
+                logger.info("Container restarted successfully")
+            else:
+                # Container exists but may be unresponsive — just wait.
+                logger.info("Container still running, waiting for health...")
+                self.docker_mgr.wait_for_container_ready(timeout=15)
+        except Exception as exc:
+            logger.error("Container restart failed", extra={"error": str(exc)})
 
     def _post(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}{endpoint}"
+        restarted = False
         for attempt in range(1, self.max_retries + 1):
             try:
                 resp = requests.post(url, json=payload, timeout=self.timeout)
@@ -25,6 +59,19 @@ class ContainerClient:
                 if 500 <= e.response.status_code < 600 and attempt < self.max_retries:
                     wait = 2 ** attempt
                     logger.warning("Transient server error, retrying...", extra={"attempt": attempt, "wait": wait})
+                    time.sleep(wait)
+                    continue
+                raise
+            except requests.exceptions.ConnectionError:
+                # Container is likely down (OOM-killed, crashed, etc.).
+                # Try to restart once before burning through remaining retries.
+                if not restarted:
+                    restarted = True
+                    self._restart_container()
+                    continue
+                if attempt < self.max_retries:
+                    wait = 2 ** attempt
+                    logger.warning("Request failed, retrying...", extra={"attempt": attempt, "wait": wait})
                     time.sleep(wait)
                     continue
                 raise

@@ -32,10 +32,11 @@ def test_bash_tool_error(_mock_llm_class):
 def test_python_tool(_mock_llm_class):
     client = MagicMock()
     sm = MagicMock()
-    client.run_python.return_value = {"output": "42"}
+    client.run_python.return_value = {"stdout": "42\n", "stderr": "", "returncode": 0}
     agent = ExecutorAgent(client, sm)
     result = agent._python_tool("Compute the answer", "print(42)", "s1")
-    assert "OUTPUT:\n42" in result
+    assert "STDOUT:\n42" in result
+    assert "RETURNCODE: 0" in result
     sm.append_progress.assert_called_once()
     progress = sm.append_progress.call_args[0][1]
     assert progress["step"] == "python"

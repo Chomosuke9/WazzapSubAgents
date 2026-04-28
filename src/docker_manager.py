@@ -131,6 +131,7 @@ class DockerManager:
                 },
                 volumes=volumes,
                 network_mode="bridge",
+                restart_policy={"Name": "unless-stopped"},
             )
             logger.info(
                 "Container started",

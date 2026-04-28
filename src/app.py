@@ -22,7 +22,7 @@ def create_app(
 ) -> Flask:
     app = Flask(__name__)
     container_url = docker_mgr.get_container_url()
-    container_client = ContainerClient(container_url)
+    container_client = ContainerClient(container_url, docker_mgr=docker_mgr)
     session_manager = SessionManager(idle_timeout=config["session_idle_timeout"])
     # Global FIFO gate limiting concurrent agent executions (default 1).
     # Tests may inject a dedicated queue to avoid leaking process-global

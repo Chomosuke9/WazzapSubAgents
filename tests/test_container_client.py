@@ -16,9 +16,10 @@ def test_run_bash():
 
 def test_run_python():
     client = ContainerClient("http://localhost:5001")
-    with patch.object(requests, "post", return_value=MagicMock(status_code=200, json=lambda: {"output": "42"})) as mock_post:
+    with patch.object(requests, "post", return_value=MagicMock(status_code=200, json=lambda: {"stdout": "42\n", "stderr": "", "returncode": 0})) as mock_post:
         result = client.run_python("print(42)")
-        assert result["output"] == "42"
+        assert result["stdout"] == "42\n"
+        assert result["returncode"] == 0
 
 
 def test_health_check_ok():

@@ -55,9 +55,9 @@ def test_python_rejects_dot_dot_traversal(client):
 
 
 def test_python_valid_session_id(client):
-    # The /python endpoint runs ``exec`` in the server process so cwd is
-    # not inherently the session workdir, but the workdir must still be
-    # created on disk so the agent can write files there explicitly.
+    # The /python endpoint now runs code in a subprocess with cwd set to
+    # the session workdir, so ``os.getcwd()`` should return the session dir.
+    # Output is captured as stdout/stderr/returncode (same as /bash).
     client_, base = client
     r = client_.post(
         "/python",
@@ -65,5 +65,6 @@ def test_python_valid_session_id(client):
     )
     assert r.status_code == 200, r.data
     out = r.get_json()
-    assert out["output"].strip() == "ok"
+    assert out["stdout"].strip() == "ok"
+    assert out["returncode"] == 0
     assert os.path.isdir(os.path.join(base, "abc"))
