@@ -50,6 +50,11 @@ BASH_TOOL_SCHEMA: Dict[str, Any] = {
                     "description": "The bash command to execute.",
                     "minLength": 1,
                 },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum time in seconds to wait for the command to finish. Default is 10.",
+                    "default": 10,
+                },
             },
             "required": ["reason", "command"],
             "additionalProperties": False,
@@ -76,6 +81,11 @@ PYTHON_TOOL_SCHEMA: Dict[str, Any] = {
                     "type": "string",
                     "description": "The Python source code to execute.",
                     "minLength": 1,
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum time in seconds to wait for the code to finish. Default is 10.",
+                    "default": 10,
                 },
             },
             "required": ["reason", "code"],
@@ -143,6 +153,11 @@ JAVASCRIPT_TOOL_SCHEMA: Dict[str, Any] = {
                     "description": "The JavaScript source code to execute.",
                     "minLength": 1,
                 },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum time in seconds to wait for the code to finish. Default is 10.",
+                    "default": 10,
+                },
             },
             "required": ["reason", "code"],
             "additionalProperties": False,
@@ -202,28 +217,31 @@ class ExecutorAgent:
         self.container_client = container_client
         self.session_manager = session_manager
         self.logger = logger_override or logger
-        base_llm = ChatOpenAI(
-            model=config["agent_model"],
-            temperature=config["agent_temperature"],
+        base_url_kwargs = {"base_url": config["llm_base_url"]} if config["llm_base_url"] else {}
+        self.llm_low = ChatOpenAI(
+            model=config["agent_model_low"],
+            temperature=config["agent_temperature_low"],
             api_key=config["llm_api_key"],
-            **({"base_url": config["llm_base_url"]} if config["llm_base_url"] else {}),
-        )
-        # Bind the tool schemas once so every invocation reuses the same
-        # ``Runnable`` and the model is forced to emit native ``tool_calls``
-        # instead of JSON-in-content.
-        self.llm = base_llm.bind_tools(TOOL_SCHEMAS)
+            **base_url_kwargs,
+        ).bind_tools(TOOL_SCHEMAS)
+        self.llm_high = ChatOpenAI(
+            model=config["agent_model_high"],
+            temperature=config["agent_temperature_high"],
+            api_key=config["llm_api_key"],
+            **base_url_kwargs,
+        ).bind_tools(TOOL_SCHEMAS)
 
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
-    def _bash_tool(self, reason: str, command: str, session_id: str) -> str:
+    def _bash_tool(self, reason: str, command: str, session_id: str, timeout: int = 10) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "bash",
             "reason": (reason or "")[:500],
             "detail": str({"reason": reason, "command": command})[:500],
             "timestamp": time.time(),
         })
-        result = self.container_client.run_bash(command, session_id=session_id)
+        result = self.container_client.run_bash(command, session_id=session_id, timeout=timeout)
         self.logger.info(
             "bash_tool executed",
             extra={
@@ -236,14 +254,14 @@ class ExecutorAgent:
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 
-    def _python_tool(self, reason: str, code: str, session_id: str) -> str:
+    def _python_tool(self, reason: str, code: str, session_id: str, timeout: int = 10) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "python",
             "reason": (reason or "")[:500],
             "detail": str({"reason": reason, "code": code})[:500],
             "timestamp": time.time(),
         })
-        result = self.container_client.run_python(code, session_id=session_id)
+        result = self.container_client.run_python(code, session_id=session_id, timeout=timeout)
         self.logger.info(
             "python_tool executed",
             extra={
@@ -258,14 +276,14 @@ class ExecutorAgent:
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 
-    def _javascript_tool(self, reason: str, code: str, session_id: str) -> str:
+    def _javascript_tool(self, reason: str, code: str, session_id: str, timeout: int = 10) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "javascript",
             "reason": (reason or "")[:500],
             "detail": str({"reason": reason, "code": code})[:500],
             "timestamp": time.time(),
         })
-        result = self.container_client.run_javascript(code, session_id=session_id)
+        result = self.container_client.run_javascript(code, session_id=session_id, timeout=timeout)
         self.logger.info(
             "javascript_tool executed",
             extra={
@@ -308,18 +326,21 @@ class ExecutorAgent:
                 reason=arguments.get("reason", ""),
                 command=arguments.get("command", ""),
                 session_id=session_id,
+                timeout=arguments.get("timeout", 10),
             )
         if tool_name == "python":
             return self._python_tool(
                 reason=arguments.get("reason", ""),
                 code=arguments.get("code", ""),
                 session_id=session_id,
+                timeout=arguments.get("timeout", 10),
             )
         if tool_name == "javascript":
             return self._javascript_tool(
                 reason=arguments.get("reason", ""),
                 code=arguments.get("code", ""),
                 session_id=session_id,
+                timeout=arguments.get("timeout", 10),
             )
         if tool_name == "end_task":
             raw_output_files = arguments.get("output_files")
@@ -574,9 +595,13 @@ class ExecutorAgent:
         instruction: str,
         input_files: List[str],
         workdir: str,
+        high_quality: bool = False,
     ) -> Dict[str, Any]:
         start_time = time.time()
-        self.logger.info("Agent loop starting", extra={"session_id": session_id})
+        self.logger.info("Agent loop starting", extra={"session_id": session_id, "high_quality": high_quality})
+
+        # Select LLM based on high_quality flag
+        self.llm = self.llm_high if high_quality else self.llm_low
 
         messages: List[Any] = [
             SystemMessage(content=self._build_system_prompt(input_files, workdir)),

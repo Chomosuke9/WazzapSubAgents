@@ -41,6 +41,7 @@ def create_app(
         input_files = data.get("input_files", [])
         callback_url = data.get("callback_url")
         progress_webhook = data.get("progress_webhook")
+        high_quality = data.get("high_quality", False)
 
         if not session_id or not instruction:
             return jsonify({"success": False, "report": "Missing session_id or instruction"}), 400
@@ -127,6 +128,7 @@ def create_app(
                     instruction=instruction,
                     input_files=input_files,
                     workdir=session.workdir,
+                    high_quality=high_quality,
                 )
                 session_manager.store_result(session_id, result)
             except Exception as e:
@@ -143,12 +145,9 @@ def create_app(
                 )
             finally:
                 # Semaphore release must run regardless of success / error /
-                # timeout / cancel. If ``acquire`` itself raised before we
-                # got a slot, we never incremented ``_free`` so there is
-                # nothing to give back — ``release`` is a no-op in that
-                # case.
-                if acquired:
-                    subagent_queue.release()
+                # timeout / cancel. ``release`` is a no-op if we never
+                # acquired (or if acquire cleaned up after itself).
+                subagent_queue.release()
 
         thread = threading.Thread(target=run_agent, daemon=True)
         thread.start()
