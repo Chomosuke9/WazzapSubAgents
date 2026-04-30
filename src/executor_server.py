@@ -40,37 +40,46 @@ def create_executor_app() -> Flask:
         data = request.get_json(force=True)
         command = data.get("command", "")
         session_id = data.get("session_id", "default")
+        timeout = data.get("timeout", 10)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            timeout = 10
         try:
             workdir = _resolve_workdir(session_id)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         os.makedirs(workdir, exist_ok=True)
-        logger.info("Executing bash", extra={"session_id": session_id, "command": command[:200]})
-        result = subprocess.run(
-            command,
-            cwd=workdir,
-            capture_output=True,
-            shell=True,
-            text=True,
-            timeout=300,
-        )
-        return jsonify({
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
-        })
+        logger.info("Executing bash", extra={"session_id": session_id, "command": command[:200], "timeout": timeout})
+        try:
+            result = subprocess.run(
+                command,
+                cwd=workdir,
+                capture_output=True,
+                shell=True,
+                text=True,
+                timeout=timeout,
+            )
+            return jsonify({
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode,
+            })
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": f"Bash execution timed out ({timeout}s)"}), 200
 
     @app.post("/javascript")
     def javascript():
         data = request.get_json(force=True)
         code = data.get("code", "")
         session_id = data.get("session_id", "default")
+        timeout = data.get("timeout", 10)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            timeout = 10
         try:
             workdir = _resolve_workdir(session_id)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         os.makedirs(workdir, exist_ok=True)
-        logger.info("Executing javascript", extra={"session_id": session_id, "code": code[:200]})
+        logger.info("Executing javascript", extra={"session_id": session_id, "code": code[:200], "timeout": timeout})
 
         # Write code to a temporary file to avoid shell escaping issues with complex scripts
         js_file = os.path.join(workdir, f".tmp_script_{os.getpid()}.js")
@@ -83,13 +92,15 @@ def create_executor_app() -> Flask:
                 cwd=workdir,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
             )
             return jsonify({
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "returncode": result.returncode,
             })
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": f"Javascript execution timed out ({timeout}s)"}), 200
         except Exception as e:
             logger.error("Javascript execution failed", exc_info=True)
             return jsonify({"error": str(e)}), 500
@@ -102,12 +113,15 @@ def create_executor_app() -> Flask:
         data = request.get_json(force=True)
         code = data.get("code", "")
         session_id = data.get("session_id", "default")
+        timeout = data.get("timeout", 10)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            timeout = 10
         try:
             workdir = _resolve_workdir(session_id)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         os.makedirs(workdir, exist_ok=True)
-        logger.info("Executing python", extra={"session_id": session_id, "code": code[:200]})
+        logger.info("Executing python", extra={"session_id": session_id, "code": code[:200], "timeout": timeout})
 
         # Execute Python code in a subprocess so that memory-hungry code
         # (e.g. PyTorch model loading) cannot OOM-kill the Flask server.
@@ -122,7 +136,7 @@ def create_executor_app() -> Flask:
                 cwd=workdir,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
             )
             return jsonify({
                 "stdout": result.stdout,
@@ -130,7 +144,7 @@ def create_executor_app() -> Flask:
                 "returncode": result.returncode,
             })
         except subprocess.TimeoutExpired:
-            return jsonify({"error": "Python execution timed out (300s)"}), 200
+            return jsonify({"error": f"Python execution timed out ({timeout}s)"}), 200
         except Exception as e:
             logger.error("Python execution failed", exc_info=True)
             return jsonify({"error": str(e)}), 500

@@ -44,3 +44,22 @@ def test_retry_on_500():
         result = client.run_bash("echo hi")
         assert result["returncode"] == 0
         assert mock_post.call_count == 2
+
+
+def test_run_bash_passes_timeout():
+    client = ContainerClient("http://localhost:5001")
+    with patch.object(requests, "post", return_value=MagicMock(status_code=200, json=lambda: {"returncode": 0})) as mock_post:
+        result = client.run_bash("sleep 5", timeout=3)
+        assert result["returncode"] == 0
+        call_args = mock_post.call_args
+        assert call_args.kwargs["json"]["timeout"] == 3
+        assert call_args.kwargs["timeout"] == 3
+
+
+def test_run_python_passes_timeout():
+    client = ContainerClient("http://localhost:5001")
+    with patch.object(requests, "post", return_value=MagicMock(status_code=200, json=lambda: {"stdout": "ok", "returncode": 0})) as mock_post:
+        result = client.run_python("print('ok')", timeout=7)
+        call_args = mock_post.call_args
+        assert call_args.kwargs["json"]["timeout"] == 7
+        assert call_args.kwargs["timeout"] == 7

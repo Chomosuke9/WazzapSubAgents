@@ -54,6 +54,16 @@ def test_python_tool_error(_mock_llm_class):
 
 
 @patch("src.agent.ChatOpenAI")
+def test_bash_tool_passes_timeout(_mock_llm_class):
+    client = MagicMock()
+    sm = MagicMock()
+    client.run_bash.return_value = {"stdout": "", "stderr": "", "returncode": 0}
+    agent = ExecutorAgent(client, sm)
+    agent._bash_tool("test", "echo hi", "s1", timeout=15)
+    client.run_bash.assert_called_once_with("echo hi", session_id="s1", timeout=15)
+
+
+@patch("src.agent.ChatOpenAI")
 def test_end_task_tool(_mock_llm_class):
     client = MagicMock()
     sm = MagicMock()

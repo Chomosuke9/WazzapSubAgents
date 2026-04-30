@@ -192,6 +192,48 @@ def test_fire_queue_event_ignores_missing_webhook():
   assert captured == []
 
 
+def test_queue_survives_acquire_interruption():
+  """If a waiter is interrupted (e.g. by a BaseException) while blocked in
+  ``acquire()``, its queue entry must not deadlock every session behind it."""
+  queue = SubAgentQueue(limit=1)
+
+  # Occupy the sole slot.
+  queue.acquire("sess-holder")
+
+  class SimulatedInterrupt(BaseException):
+    pass
+
+  def interrupting_callback(*args):
+    raise SimulatedInterrupt("simulated interrupt")
+
+  def worker():
+    try:
+      queue.acquire("sess-doomed", on_enqueue=interrupting_callback)
+    except SimulatedInterrupt:
+      pass
+
+  t = threading.Thread(target=worker)
+  t.start()
+  t.join(timeout=2.0)
+  assert not t.is_alive(), "worker did not finish"
+
+  # Release the slot.  A follow-up acquire must succeed — the zombie entry
+  # left by ``sess-doomed`` must not block it forever.
+  queue.release()
+
+  acquired = threading.Event()
+
+  def follow_up():
+    queue.acquire("sess-after")
+    acquired.set()
+    queue.release()
+
+  t2 = threading.Thread(target=follow_up)
+  t2.start()
+  assert acquired.wait(timeout=2.0), "queue deadlocked after interrupted acquire"
+  t2.join(timeout=2.0)
+
+
 def test_fire_queue_event_ignores_unknown_session():
   sm = SessionManager(idle_timeout=60)
   captured: list = []

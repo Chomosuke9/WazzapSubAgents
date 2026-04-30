@@ -47,12 +47,13 @@ class ContainerClient:
         except Exception as exc:
             logger.error("Container restart failed", extra={"error": str(exc)})
 
-    def _post(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(self, endpoint: str, payload: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{endpoint}"
         restarted = False
+        request_timeout = timeout if timeout is not None else self.timeout
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = requests.post(url, json=payload, timeout=self.timeout)
+                resp = requests.post(url, json=payload, timeout=request_timeout)
                 resp.raise_for_status()
                 return resp.json()
             except requests.exceptions.HTTPError as e:
@@ -84,21 +85,21 @@ class ContainerClient:
                 raise
         raise RuntimeError(f"Failed to POST {url} after {self.max_retries} attempts")
 
-    def run_bash(self, command: str, session_id: str = "default") -> Dict[str, Any]:
-        logger.info("Running bash in container", extra={"command": command[:200], "session_id": session_id})
-        result = self._post("/bash", {"command": command, "session_id": session_id})
+    def run_bash(self, command: str, session_id: str = "default", timeout: Optional[int] = None) -> Dict[str, Any]:
+        logger.info("Running bash in container", extra={"command": command[:200], "session_id": session_id, "timeout": timeout})
+        result = self._post("/bash", {"command": command, "session_id": session_id, "timeout": timeout}, timeout=timeout)
         logger.info("Bash completed", extra={"returncode": result.get("returncode"), "session_id": session_id})
         return result
 
-    def run_python(self, code: str, session_id: str = "default") -> Dict[str, Any]:
-        logger.info("Running python in container", extra={"code": code[:200], "session_id": session_id})
-        result = self._post("/python", {"code": code, "session_id": session_id})
+    def run_python(self, code: str, session_id: str = "default", timeout: Optional[int] = None) -> Dict[str, Any]:
+        logger.info("Running python in container", extra={"code": code[:200], "session_id": session_id, "timeout": timeout})
+        result = self._post("/python", {"code": code, "session_id": session_id, "timeout": timeout}, timeout=timeout)
         logger.info("Python completed", extra={"session_id": session_id})
         return result
 
-    def run_javascript(self, code: str, session_id: str = "default") -> Dict[str, Any]:
-        logger.info("Running javascript in container", extra={"code": code[:200], "session_id": session_id})
-        result = self._post("/javascript", {"code": code, "session_id": session_id})
+    def run_javascript(self, code: str, session_id: str = "default", timeout: Optional[int] = None) -> Dict[str, Any]:
+        logger.info("Running javascript in container", extra={"code": code[:200], "session_id": session_id, "timeout": timeout})
+        result = self._post("/javascript", {"code": code, "session_id": session_id, "timeout": timeout}, timeout=timeout)
         logger.info("Javascript completed", extra={"session_id": session_id})
         return result
 

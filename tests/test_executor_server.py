@@ -68,3 +68,39 @@ def test_python_valid_session_id(client):
     assert out["stdout"].strip() == "ok"
     assert out["returncode"] == 0
     assert os.path.isdir(os.path.join(base, "abc"))
+
+
+def test_bash_respects_custom_timeout(client):
+    client_, _ = client
+    r = client_.post(
+        "/bash",
+        json={"command": "sleep 5", "session_id": "timeout-test", "timeout": 1},
+    )
+    assert r.status_code == 200, r.data
+    out = r.get_json()
+    assert "timed out (1s)" in out["error"]
+
+
+def test_python_respects_custom_timeout(client):
+    client_, _ = client
+    r = client_.post(
+        "/python",
+        json={"code": "import time; time.sleep(5)", "session_id": "timeout-test", "timeout": 1},
+    )
+    assert r.status_code == 200, r.data
+    out = r.get_json()
+    assert "timed out (1s)" in out["error"]
+
+
+def test_javascript_respects_custom_timeout(client):
+    import shutil
+    if not shutil.which("node"):
+        pytest.skip("node not available in this environment")
+    client_, _ = client
+    r = client_.post(
+        "/javascript",
+        json={"code": "setTimeout(() => {}, 5000);", "session_id": "timeout-test", "timeout": 1},
+    )
+    assert r.status_code == 200, r.data
+    out = r.get_json()
+    assert "timed out (1s)" in out["error"]

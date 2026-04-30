@@ -32,6 +32,7 @@ from typing import Callable, Deque, List, Optional, Tuple
 class QueueEntry:
   session_id: str
   enqueued_at: float = field(default_factory=time.time)
+  canceled: bool = False
 
 
 QueueUpdate = Tuple[str, int, int]  # (session_id, position, queue_size)
@@ -82,39 +83,58 @@ class SubAgentQueue:
     (spawns a daemon thread), so this is safe.
     """
     entry = QueueEntry(session_id=session_id)
+    acquired_here = False
     emitted_enqueue = False
     with self._cond:
       self._queue.append(entry)
-      while True:
-        if self._queue and self._queue[0] is entry and self._free > 0:
-          self._queue.popleft()
-          self._free -= 1
-          remaining = [
-            (e.session_id, i + 1, len(self._queue))
-            for i, e in enumerate(self._queue)
-          ]
-          # Only broadcast advances if this session actually had to wait —
-          # a session that was granted a slot instantly did not cause
-          # anybody else's position to change.
-          if emitted_enqueue and on_advance is not None and remaining:
-            try:
-              on_advance(remaining)
-            except Exception:
-              # Webhook failure must never deadlock the queue.
-              pass
-          return
+      try:
+        while True:
+          # Purge dead entries from the head so a canceled waiter can
+          # never block everybody behind it.
+          while self._queue and self._queue[0].canceled:
+            self._queue.popleft()
 
-        if not emitted_enqueue:
-          position = next((i + 1 for i, e in enumerate(self._queue) if e is entry), 0)
-          queue_size = len(self._queue)
-          emitted_enqueue = True
-          if on_enqueue is not None:
-            try:
-              on_enqueue(session_id, position, queue_size)
-            except Exception:
-              pass
+          if self._queue and self._queue[0] is entry and self._free > 0:
+            self._queue.popleft()
+            self._free -= 1
+            acquired_here = True
+            remaining = [
+              (e.session_id, i + 1, len(self._queue))
+              for i, e in enumerate(self._queue)
+            ]
+            # Only broadcast advances if this session actually had to wait —
+            # a session that was granted a slot instantly did not cause
+            # anybody else's position to change.
+            if emitted_enqueue and on_advance is not None and remaining:
+              try:
+                on_advance(remaining)
+              except Exception:
+                # Webhook failure must never deadlock the queue.
+                pass
+            return
 
-        self._cond.wait()
+          if not emitted_enqueue:
+            position = next((i + 1 for i, e in enumerate(self._queue) if e is entry), 0)
+            queue_size = len(self._queue)
+            emitted_enqueue = True
+            if on_enqueue is not None:
+              try:
+                on_enqueue(session_id, position, queue_size)
+              except Exception:
+                pass
+
+          self._cond.wait()
+      except BaseException:
+        if acquired_here:
+          # We had taken the slot but are bailing out — give it back.
+          if self._free < self._limit:
+            self._free += 1
+        else:
+          # We never got a slot; mark our entry as canceled so the queue
+          # doesn't deadlock on a zombie.
+          entry.canceled = True
+        self._cond.notify_all()
+        raise
 
   def release(self) -> None:
     """Return the slot held by the current session. Safe to call even if
