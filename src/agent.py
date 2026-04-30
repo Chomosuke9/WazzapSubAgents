@@ -251,6 +251,8 @@ class ExecutorAgent:
                 "returncode": result.get("returncode"),
             },
         )
+        if "error" in result:
+            return f"ERROR:\n{result['error']}"
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 
@@ -489,18 +491,19 @@ class ExecutorAgent:
     # ------------------------------------------------------------------
     # LLM invocation with retry on transient errors
     # ------------------------------------------------------------------
-    def _invoke_llm_with_retry(self, messages: List[Any], session_id: str) -> Any:
+    def _invoke_llm_with_retry(self, messages: List[Any], session_id: str, llm: Any = None) -> Any:
         """Call the LLM with bounded retries for transient errors.
 
         A single transient failure (rate limit, network blip, 5xx) used to
         kill the entire sub-task. We now retry up to ``LLM_RETRY_MAX`` times
         with exponential backoff, honouring ``Retry-After`` when given.
         """
+        active_llm = llm if llm is not None else self.llm_low
         attempts = max(1, LLM_RETRY_MAX + 1)
         last_err: Optional[BaseException] = None
         for attempt in range(1, attempts + 1):
             try:
-                return self.llm.invoke(messages)
+                return active_llm.invoke(messages)
             except Exception as err:  # pylint: disable=broad-except
                 last_err = err
                 retryable = _is_retryable_llm_error(err)
@@ -545,6 +548,7 @@ class ExecutorAgent:
         messages: List[Any],
         session_id: str,
         iteration: int,
+        llm: Any = None,
     ) -> tuple[Any, List[Dict[str, Any]]]:
         """Invoke the LLM, retrying *at the same turn* when the response
         contains no native ``tool_calls``.
@@ -557,7 +561,7 @@ class ExecutorAgent:
         attempts = max(1, NO_TOOL_RETRY_MAX + 1)
         last_response: Any = None
         for attempt in range(1, attempts + 1):
-            response = self._invoke_llm_with_retry(messages, session_id=session_id)
+            response = self._invoke_llm_with_retry(messages, session_id=session_id, llm=llm)
             tool_calls = self._normalize_tool_calls(response)
             last_response = response
             if tool_calls:
@@ -598,10 +602,10 @@ class ExecutorAgent:
         high_quality: bool = False,
     ) -> Dict[str, Any]:
         start_time = time.time()
+        # Select LLM based on high_quality flag — store as a local to avoid
+        # mutating self and risking a data race if the instance is ever reused.
+        llm = self.llm_high if high_quality else self.llm_low
         self.logger.info("Agent loop starting", extra={"session_id": session_id, "high_quality": high_quality})
-
-        # Select LLM based on high_quality flag
-        self.llm = self.llm_high if high_quality else self.llm_low
 
         messages: List[Any] = [
             SystemMessage(content=self._build_system_prompt(input_files, workdir)),
@@ -619,6 +623,7 @@ class ExecutorAgent:
                     messages,
                     session_id=session_id,
                     iteration=i,
+                    llm=llm,
                 )
             except Exception as err:  # pylint: disable=broad-except
                 final_result = {

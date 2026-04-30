@@ -127,8 +127,7 @@ class SubAgentQueue:
       except BaseException:
         if acquired_here:
           # We had taken the slot but are bailing out — give it back.
-          if self._free < self._limit:
-            self._free += 1
+          self._free += 1
         else:
           # We never got a slot; mark our entry as canceled so the queue
           # doesn't deadlock on a zombie.

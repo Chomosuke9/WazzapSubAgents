@@ -29,6 +29,19 @@ def test_bash_tool_error(_mock_llm_class):
 
 
 @patch("src.agent.ChatOpenAI")
+def test_bash_tool_handles_error_key(_mock_llm_class):
+    """When the executor returns an 'error' key (e.g. timeout), _bash_tool
+    must surface it as a clear ERROR message, not an empty STDOUT/STDERR."""
+    client = MagicMock()
+    sm = MagicMock()
+    client.run_bash.return_value = {"error": "Bash execution timed out (10s)"}
+    agent = ExecutorAgent(client, sm)
+    result = agent._bash_tool("Running slow cmd", "sleep 999", "s1")
+    assert "ERROR:" in result
+    assert "timed out" in result
+
+
+@patch("src.agent.ChatOpenAI")
 def test_python_tool(_mock_llm_class):
     client = MagicMock()
     sm = MagicMock()
@@ -84,3 +97,53 @@ def test_end_task_tool_passes_through_output_files(_mock_llm_class):
         True, "Done", "s1", output_files=["/tmp/out.pdf"],
     )
     assert result["output_files"] == ["/tmp/out.pdf"]
+
+
+@patch("src.agent.ChatOpenAI")
+def test_execute_high_quality_uses_llm_high(_mock_llm_class):
+    """When high_quality=True, the agent must select llm_high (not llm_low)
+    for the execution loop. This guards against the old self.llm mutation."""
+    client = MagicMock()
+    sm = MagicMock()
+    # Build two distinct mock LLMs so we can assert which one was invoked.
+    mock_llm_low = MagicMock()
+    mock_llm_high = MagicMock()
+    _mock_llm_class.return_value.bind_tools.side_effect = [mock_llm_low, mock_llm_high]
+
+    # Build a minimal response with an end_task tool call
+    end_response = MagicMock()
+    end_response.content = ""
+    end_response.tool_calls = [{"name": "end_task", "args": {"success": True, "report": "done"}, "id": "tc-1"}]
+
+    mock_llm_high.invoke.return_value = end_response
+
+    agent = ExecutorAgent(client, sm)
+    result = agent.execute("hq-sess", "complex task", [], "/tmp/work", high_quality=True)
+
+    assert result["success"] is True
+    mock_llm_high.invoke.assert_called_once()
+    mock_llm_low.invoke.assert_not_called()
+
+
+@patch("src.agent.ChatOpenAI")
+def test_execute_default_uses_llm_low(_mock_llm_class):
+    """When high_quality is not specified (default), the agent must use
+    llm_low, not llm_high."""
+    client = MagicMock()
+    sm = MagicMock()
+    mock_llm_low = MagicMock()
+    mock_llm_high = MagicMock()
+    _mock_llm_class.return_value.bind_tools.side_effect = [mock_llm_low, mock_llm_high]
+
+    end_response = MagicMock()
+    end_response.content = ""
+    end_response.tool_calls = [{"name": "end_task", "args": {"success": True, "report": "done"}, "id": "tc-1"}]
+
+    mock_llm_low.invoke.return_value = end_response
+
+    agent = ExecutorAgent(client, sm)
+    result = agent.execute("lq-sess", "simple task", [], "/tmp/work")
+
+    assert result["success"] is True
+    mock_llm_low.invoke.assert_called_once()
+    mock_llm_high.invoke.assert_not_called()

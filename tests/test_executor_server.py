@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from src.executor_server import create_executor_app
+from src.executor_server import create_executor_app, _clamp_timeout, _safe_remove, MAX_TIMEOUT
 
 
 @pytest.fixture
@@ -104,3 +104,62 @@ def test_javascript_respects_custom_timeout(client):
     assert r.status_code == 200, r.data
     out = r.get_json()
     assert "timed out (1s)" in out["error"]
+
+
+# --- _clamp_timeout tests ---
+
+def test_clamp_timeout_defaults_on_missing():
+    assert _clamp_timeout(None) == 10
+    assert _clamp_timeout(0) == 10
+    assert _clamp_timeout(-5) == 10
+
+
+def test_clamp_timeout_defaults_on_invalid_type():
+    assert _clamp_timeout("abc") == 10
+    assert _clamp_timeout([10]) == 10
+
+
+def test_clamp_timeout_passes_valid_values():
+    assert _clamp_timeout(1) == 1
+    assert _clamp_timeout(10) == 10
+    assert _clamp_timeout(30.5) == 30.5
+
+
+def test_clamp_timeout_caps_at_max():
+    assert _clamp_timeout(MAX_TIMEOUT + 1) == MAX_TIMEOUT
+    assert _clamp_timeout(999999) == MAX_TIMEOUT
+    assert _clamp_timeout(MAX_TIMEOUT) == MAX_TIMEOUT
+
+
+# --- _safe_remove tests ---
+
+def test_safe_remove_deletes_existing_file(tmp_path):
+    f = tmp_path / "to_delete.txt"
+    f.write_text("bye")
+    assert f.exists()
+    _safe_remove(str(f))
+    assert not f.exists()
+
+
+def test_safe_remove_ignores_missing_file(tmp_path):
+    # Should not raise
+    _safe_remove(str(tmp_path / "nonexistent.txt"))
+
+
+def test_safe_remove_ignores_os_error(tmp_path, monkeypatch):
+    """Even if os.remove raises, _safe_remove should not propagate the error."""
+    f = tmp_path / "stubborn.txt"
+    f.write_text("won't go away")
+
+    original_remove = os.remove
+    call_count = 0
+
+    def failing_remove(path):
+        nonlocal call_count
+        call_count += 1
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr(os, "remove", failing_remove)
+    # Should not raise, even though os.remove fails
+    _safe_remove(str(f))
+    assert call_count == 1

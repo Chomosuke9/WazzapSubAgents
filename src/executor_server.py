@@ -1,11 +1,39 @@
 import os
 import subprocess
+import uuid
 
 from flask import Flask, request, jsonify
 
 from src.logger import get_logger
 
 logger = get_logger("executor-server")
+
+# Execution timeout upper bound — prevents a single request from holding a
+# Flask thread for an unbounded amount of time.
+MAX_TIMEOUT = 600  # 10 minutes
+
+
+def _clamp_timeout(timeout, default: int = 10) -> int | float:
+    """Validate and clamp an execution timeout.
+
+    Falls back to *default* when the value is missing, non-numeric,
+    non-positive, or exceeds ``MAX_TIMEOUT``.
+    """
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        return default
+    if timeout > MAX_TIMEOUT:
+        return MAX_TIMEOUT
+    return timeout
+
+
+def _safe_remove(path: str) -> None:
+    """Remove a temp file, ignoring OS errors so a cleanup failure never
+    masks the real result of a tool execution."""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as exc:
+        logger.warning("Failed to remove temp file %s: %s", path, exc)
 
 
 def create_executor_app() -> Flask:
@@ -40,9 +68,7 @@ def create_executor_app() -> Flask:
         data = request.get_json(force=True)
         command = data.get("command", "")
         session_id = data.get("session_id", "default")
-        timeout = data.get("timeout", 10)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            timeout = 10
+        timeout = _clamp_timeout(data.get("timeout", 10))
         try:
             workdir = _resolve_workdir(session_id)
         except ValueError as exc:
@@ -71,9 +97,7 @@ def create_executor_app() -> Flask:
         data = request.get_json(force=True)
         code = data.get("code", "")
         session_id = data.get("session_id", "default")
-        timeout = data.get("timeout", 10)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            timeout = 10
+        timeout = _clamp_timeout(data.get("timeout", 10))
         try:
             workdir = _resolve_workdir(session_id)
         except ValueError as exc:
@@ -81,8 +105,9 @@ def create_executor_app() -> Flask:
         os.makedirs(workdir, exist_ok=True)
         logger.info("Executing javascript", extra={"session_id": session_id, "code": code[:200], "timeout": timeout})
 
-        # Write code to a temporary file to avoid shell escaping issues with complex scripts
-        js_file = os.path.join(workdir, f".tmp_script_{os.getpid()}.js")
+        # Write code to a temporary file to avoid shell escaping issues with complex scripts.
+        # Use uuid4 to guarantee uniqueness even under concurrent requests in the same process.
+        js_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.js")
         try:
             with open(js_file, "w") as f:
                 f.write(code)
@@ -105,17 +130,14 @@ def create_executor_app() -> Flask:
             logger.error("Javascript execution failed", exc_info=True)
             return jsonify({"error": str(e)}), 500
         finally:
-            if os.path.exists(js_file):
-                os.remove(js_file)
+            _safe_remove(js_file)
 
     @app.post("/python")
     def python():
         data = request.get_json(force=True)
         code = data.get("code", "")
         session_id = data.get("session_id", "default")
-        timeout = data.get("timeout", 10)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            timeout = 10
+        timeout = _clamp_timeout(data.get("timeout", 10))
         try:
             workdir = _resolve_workdir(session_id)
         except ValueError as exc:
@@ -126,7 +148,8 @@ def create_executor_app() -> Flask:
         # Execute Python code in a subprocess so that memory-hungry code
         # (e.g. PyTorch model loading) cannot OOM-kill the Flask server.
         # This mirrors how /javascript and /bash already spawn child processes.
-        py_file = os.path.join(workdir, f".tmp_script_{os.getpid()}.py")
+        # Use uuid4 to guarantee uniqueness even under concurrent requests.
+        py_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.py")
         try:
             with open(py_file, "w") as f:
                 f.write(code)
@@ -149,8 +172,7 @@ def create_executor_app() -> Flask:
             logger.error("Python execution failed", exc_info=True)
             return jsonify({"error": str(e)}), 500
         finally:
-            if os.path.exists(py_file):
-                os.remove(py_file)
+            _safe_remove(py_file)
 
     @app.get("/health")
     def health():

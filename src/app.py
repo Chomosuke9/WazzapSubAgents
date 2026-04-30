@@ -42,6 +42,11 @@ def create_app(
         callback_url = data.get("callback_url")
         progress_webhook = data.get("progress_webhook")
         high_quality = data.get("high_quality", False)
+        # Normalize to bool: callers may send "true"/"false" strings, 1/0 ints, etc.
+        if isinstance(high_quality, str):
+            high_quality = high_quality.lower() in ("true", "1", "yes", "on")
+        else:
+            high_quality = bool(high_quality)
 
         if not session_id or not instruction:
             return jsonify({"success": False, "report": "Missing session_id or instruction"}), 400

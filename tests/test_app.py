@@ -52,6 +52,78 @@ def test_execute_rejects_empty_session_id_with_400(client):
     assert "must not be empty" in body["report"]
 
 
+def test_execute_normalizes_high_quality_bool(client):
+    """The endpoint must accept various truthy/falsy types for ``high_quality``
+    and normalise them to a Python bool before passing to the agent."""
+    import threading
+    from unittest.mock import patch, MagicMock
+
+    cases = [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("yes", True),
+        (1, True),
+        (True, True),
+        ("false", False),
+        ("False", False),
+        ("0", False),
+        ("no", False),
+        (0, False),
+        (False, False),
+    ]
+
+    for raw_value, expected in cases:
+        fake_agent = MagicMock()
+        fake_agent.execute.return_value = {
+            "session_id": "s-bool",
+            "success": True,
+            "report": "ok",
+            "output_files": [],
+            "processing_time_sec": 0,
+        }
+
+        captured = {}
+
+        def _capture_execute(**kwargs):
+            captured.update(kwargs)
+            return fake_agent.execute.return_value
+
+        fake_agent.execute.side_effect = _capture_execute
+
+        done = threading.Event()
+        orig_thread = threading.Thread
+
+        def waiting_thread(*args, **kwargs):
+            target = kwargs.get("target") or (args[0] if args else None)
+            def wrapped():
+                try:
+                    if target:
+                        target()
+                finally:
+                    done.set()
+            kwargs["target"] = wrapped
+            return orig_thread(*args, **kwargs)
+
+        with patch("src.app.ExecutorAgent", return_value=fake_agent), \
+             patch("src.app.threading.Thread", side_effect=waiting_thread):
+            r = client.post(
+                "/execute",
+                json={
+                    "session_id": "s-bool",
+                    "instruction": "do it",
+                    "high_quality": raw_value,
+                },
+            )
+            assert r.status_code == 202
+            assert done.wait(timeout=5), f"Thread did not finish for high_quality={raw_value!r}"
+
+        assert "high_quality" in captured, f"high_quality not captured for raw_value={raw_value!r}"
+        assert captured["high_quality"] is expected, (
+            f"high_quality={raw_value!r} should be {expected}, got {captured['high_quality']}"
+        )
+
+
 def test_execute_restages_input_files_into_workdir(tmp_path, monkeypatch):
     """Pin the cross-process path-reachability fix.
 
