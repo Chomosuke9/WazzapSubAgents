@@ -252,7 +252,12 @@ class ExecutorAgent:
             },
         )
         if "error" in result:
-            return f"ERROR:\n{result['error']}"
+            return (
+                f"ERROR:\n{result['error']}"
+                f"\nSTDOUT:\n{result.get('stdout', '')}"
+                f"\nSTDERR:\n{result.get('stderr', '')}"
+                f"\nRETURNCODE: {result.get('returncode')}"
+            )
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 
@@ -274,7 +279,12 @@ class ExecutorAgent:
             },
         )
         if "error" in result:
-            return f"ERROR:\n{result['error']}"
+            return (
+                f"ERROR:\n{result['error']}"
+                f"\nSTDOUT:\n{result.get('stdout', '')}"
+                f"\nSTDERR:\n{result.get('stderr', '')}"
+                f"\nRETURNCODE: {result.get('returncode')}"
+            )
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 
@@ -295,7 +305,12 @@ class ExecutorAgent:
             },
         )
         if "error" in result:
-            return f"ERROR:\n{result['error']}"
+            return (
+                f"ERROR:\n{result['error']}"
+                f"\nSTDOUT:\n{result.get('stdout', '')}"
+                f"\nSTDERR:\n{result.get('stderr', '')}"
+                f"\nRETURNCODE: {result.get('returncode')}"
+            )
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 

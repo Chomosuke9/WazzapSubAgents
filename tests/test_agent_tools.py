@@ -31,7 +31,8 @@ def test_bash_tool_error(_mock_llm_class):
 @patch("src.agent.ChatOpenAI")
 def test_bash_tool_handles_error_key(_mock_llm_class):
     """When the executor returns an 'error' key (e.g. timeout), _bash_tool
-    must surface it as a clear ERROR message, not an empty STDOUT/STDERR."""
+    must surface it as a clear ERROR message. Partial stdout/stderr are
+    still included when present for diagnostic value."""
     client = MagicMock()
     sm = MagicMock()
     client.run_bash.return_value = {"error": "Bash execution timed out (10s)"}
@@ -39,6 +40,9 @@ def test_bash_tool_handles_error_key(_mock_llm_class):
     result = agent._bash_tool("Running slow cmd", "sleep 999", "s1")
     assert "ERROR:" in result
     assert "timed out" in result
+    # Even error-only results include STDOUT/STDERR/RETURNCODE sections
+    assert "STDOUT:" in result
+    assert "STDERR:" in result
 
 
 @patch("src.agent.ChatOpenAI")
