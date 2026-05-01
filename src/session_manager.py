@@ -11,6 +11,20 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Webhook delivery tunables. The WazzapAgents webhook server is always-on
+# (auto-restarts on crash), so transient failures are expected to resolve
+# quickly. We retry aggressively with exponential backoff to match that
+# reliability guarantee.
+_WEBHOOK_RETRY_MAX = int(os.getenv("WEBHOOK_RETRY_MAX", "10"))
+_WEBHOOK_RETRY_BASE_BACKOFF = float(os.getenv("WEBHOOK_RETRY_BASE_BACKOFF", "0.5"))
+_WEBHOOK_RETRY_MAX_BACKOFF = float(os.getenv("WEBHOOK_RETRY_MAX_BACKOFF", "30.0"))
+
+# Pre-flight health check: how many times to probe the webhook endpoint
+# before giving up. Used by ``check_webhook_health`` to confirm the
+# WazzapAgents bridge is reachable before submitting a task.
+_WEBHOOK_HEALTH_CHECK_ATTEMPTS = int(os.getenv("WEBHOOK_HEALTH_CHECK_ATTEMPTS", "3"))
+_WEBHOOK_HEALTH_CHECK_TIMEOUT = float(os.getenv("WEBHOOK_HEALTH_CHECK_TIMEOUT", "5.0"))
+
 
 @dataclass
 class Session:
@@ -131,9 +145,17 @@ class SessionManager:
         self._fire_webhook(url, payload)
 
     def _fire_webhook(self, url: str, payload: dict) -> None:
-        max_attempts = int(os.getenv("WEBHOOK_RETRY_MAX", "5"))
-        base_backoff = float(os.getenv("WEBHOOK_RETRY_BASE_BACKOFF", "1.0"))
-        max_backoff = float(os.getenv("WEBHOOK_RETRY_MAX_BACKOFF", "30.0"))
+        """Fire a webhook with aggressive retries.
+
+        The WazzapAgents webhook server is always-on and auto-restarts
+        on crash, so transient 5xx / connection-refused errors are
+        expected to heal quickly. We retry with exponential backoff
+        starting from a short 0.5 s base and cap at 30 s, defaulting
+        to 10 attempts (up from 5) to match the always-on guarantee.
+        """
+        max_attempts = _WEBHOOK_RETRY_MAX
+        base_backoff = _WEBHOOK_RETRY_BASE_BACKOFF
+        max_backoff = _WEBHOOK_RETRY_MAX_BACKOFF
 
         def _send():
             for attempt in range(1, max_attempts + 1):
@@ -148,8 +170,9 @@ class SessionManager:
                 except Exception as e:
                     if attempt >= max_attempts:
                         logger.error(
-                            "Webhook failed permanently",
-                            extra={"url": url, "error": str(e), "attempts": attempt},
+                            "Webhook failed permanently after %d attempts",
+                            max_attempts,
+                            extra={"url": url, "error": str(e)},
                         )
                         return
                     backoff = min(max_backoff, base_backoff * (2 ** (attempt - 1)))
@@ -160,6 +183,62 @@ class SessionManager:
                     time.sleep(backoff)
 
         threading.Thread(target=_send, daemon=True).start()
+
+    @staticmethod
+    def check_webhook_health(webhook_url: str) -> bool:
+        """Probe the WazzapAgents webhook health endpoint.
+
+        The bridge exposes ``GET /health`` on the same host/port as the
+        callback endpoint. This pre-flight check confirms the always-on
+        webhook server is reachable before we submit a task that relies
+        on it for progress and completion callbacks.
+
+        Returns ``True`` if the health check succeeds, ``False`` otherwise.
+        """
+        if not webhook_url:
+            return False
+        # Derive the health URL from the callback URL:
+        #   http://host:8081/subagent/callback → http://host:8081/health
+        try:
+            from urllib.parse import urlsplit, urlunsplit
+            parsed = urlsplit(webhook_url)
+            health_url = urlunsplit((
+                parsed.scheme,
+                parsed.netloc,
+                "/health",
+                "",
+                "",
+            ))
+        except Exception:
+            return False
+
+        for attempt in range(1, _WEBHOOK_HEALTH_CHECK_ATTEMPTS + 1):
+            try:
+                resp = requests.get(health_url, timeout=_WEBHOOK_HEALTH_CHECK_TIMEOUT)
+                if resp.status_code == 200:
+                    logger.info(
+                        "Webhook health check passed",
+                        extra={"health_url": health_url, "attempt": attempt},
+                    )
+                    return True
+                logger.warning(
+                    "Webhook health check returned %d",
+                    resp.status_code,
+                    extra={"health_url": health_url, "attempt": attempt},
+                )
+            except Exception as e:
+                logger.warning(
+                    "Webhook health check failed",
+                    extra={"health_url": health_url, "attempt": attempt, "error": str(e)},
+                )
+            if attempt < _WEBHOOK_HEALTH_CHECK_ATTEMPTS:
+                time.sleep(1.0)
+        logger.error(
+            "Webhook health check failed after %d attempts",
+            _WEBHOOK_HEALTH_CHECK_ATTEMPTS,
+            extra={"health_url": health_url},
+        )
+        return False
 
     def get_result(self, session_id: str) -> Optional[dict]:
         with self._lock:

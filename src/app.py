@@ -65,6 +65,34 @@ def create_app(
             return jsonify({"success": False, "report": str(exc)}), 400
         session_manager.set_callback(session_id, callback_url, progress_webhook)
 
+        # Pre-flight: verify the WazzapAgents webhook server is reachable
+        # before submitting the task. The webhook is always-on (auto-
+        # restarts on crash), so a failure here is transient. We log a
+        # warning but still proceed — the webhook will likely recover
+        # by the time the agent finishes and fires callbacks.
+        webhook_url = progress_webhook or callback_url
+        if webhook_url:
+            # Run health check in a background thread to avoid blocking the
+            # HTTP response; the check is advisory, not gating.
+            def _health_check():
+                try:
+                    healthy = SessionManager.check_webhook_health(webhook_url)
+                    if not healthy:
+                        logger.warning(
+                            "Webhook health check failed for session=%s; "
+                            "proceeding anyway (webhook should auto-recover)",
+                            session_id,
+                            extra={"session_id": session_id, "webhook_url": webhook_url},
+                        )
+                except Exception as exc:  # pylint: disable=broad-except
+                    logger.warning(
+                        "Webhook health check error for session=%s: %s",
+                        session_id,
+                        exc,
+                        extra={"session_id": session_id},
+                    )
+            threading.Thread(target=_health_check, daemon=True).start()
+
         # Re-stage the caller's input files into ``<workdir>/input/`` so the
         # paths handed to the agent's bash/python tools are reachable from
         # inside the executor sidecar. Without this, paths that live outside
@@ -165,6 +193,13 @@ def create_app(
 
     @app.get("/sessions/<session_id>/result")
     def get_result(session_id: str):
+        """Return the result for a completed session.
+
+        This endpoint is kept for manual debugging / operational visibility
+        only. The primary result-delivery path is the always-on webhook
+        callback (``callback_url`` / ``progress_webhook``); WazzapAgents no
+        longer polls this endpoint.
+        """
         result = session_manager.get_result(session_id)
         if result is None:
             return jsonify({"success": False, "report": "Result not found or expired"}), 404
