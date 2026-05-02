@@ -53,7 +53,9 @@ RUN pip install --no-cache-dir --user \
     python-pptx \
     reportlab \
     markdownify \
-    "markitdown[pptx]"
+    "markitdown[pptx]" \
+    yt-dlp \
+    spotdl
 
 # Stage 2: Runtime (copy pre-installed packages only)
 FROM python:3.14-slim
@@ -81,6 +83,7 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     libglib2.0-0 \
     libcairo2 \
+    ffmpeg \
     poppler-utils \
     tesseract-ocr \
     ghostscript \
