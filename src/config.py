@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # .env — system config, models, and LLM_API_KEY
+load_dotenv(".env.secrets")  # .env.secrets — skill-specific secrets (supplements .env, won't override)
 
 # Required vars
 LLM_API_KEY = os.getenv("LLM_API_KEY")

@@ -1,5 +1,6 @@
 # executor-service
 .env
+.env.secrets
 *.pyc
 __pycache__/
 .pytest_cache/

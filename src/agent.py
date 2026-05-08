@@ -11,6 +11,7 @@ from src.container_client import ContainerClient
 from src.logger import get_logger
 from src.session_manager import SessionManager
 from src.prompts import EXECUTOR_SYSTEM_PROMPT
+from src.secrets_redaction import redact_secrets
 
 logger = get_logger(__name__)
 
@@ -314,6 +315,33 @@ class ExecutorAgent:
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return output
 
+    @staticmethod
+    def _redact_secrets_in_files(file_paths: List[str], session_id: str) -> None:
+        """Scan output files for known secret values and overwrite with
+        redacted content. Binary files and very large files are skipped
+        silently. Only overwrites when a secret was actually found."""
+        # 1 MB cap — skip very large files to avoid memory issues
+        MAX_FILE_SIZE = 1 * 1024 * 1024
+
+        for path in file_paths:
+            try:
+                if os.path.getsize(path) > MAX_FILE_SIZE:
+                    continue
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except (OSError, UnicodeDecodeError):
+                # Binary file or unreadable — skip
+                continue
+
+            redacted = redact_secrets(content)
+            if redacted != content:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(redacted)
+                logger.warning(
+                    "Redacted secrets from output file",
+                    extra={"session_id": session_id, "file": path},
+                )
+
     def _end_task_tool(
         self,
         success: bool,
@@ -449,6 +477,13 @@ class ExecutorAgent:
                 len(skipped),
                 extra={"session_id": session_id, "skipped": skipped},
             )
+
+        # Scan output files for leaked secrets and redact in-place.
+        # The agent could write keys to files (intentionally or not), e.g.
+        #   echo $BRAVE_SEARCH_API_KEY > api_key.txt
+        # and then list that file as an output_file. We strip known secret
+        # values from text files before they reach the user.
+        self._redact_secrets_in_files(accepted, session_id=session_id)
 
         return accepted
 
@@ -745,7 +780,7 @@ class ExecutorAgent:
                     )
 
                 messages.append(ToolMessage(
-                    content=str(result),
+                    content=redact_secrets(str(result)),
                     tool_call_id=tc_id,
                     name=tool_name,
                 ))
@@ -770,7 +805,7 @@ class ExecutorAgent:
         result_payload = {
             "session_id": session_id,
             "success": final_result.get("success", False),
-            "report": final_result.get("report", ""),
+            "report": redact_secrets(final_result.get("report", "")),
             "output_files": output_files,
             "processing_time_sec": processing_time,
         }

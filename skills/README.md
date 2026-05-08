@@ -13,6 +13,7 @@ This directory contains specialized instructions and documentation for various d
 | [pptx](./pptx) | Tools and templates for creating and modifying PowerPoint presentations (.pptx) using `pptxgenjs` and `python-pptx`. |
 | [xlsx](./xlsx) | Instructions for spreadsheet manipulation, data analysis, and styled Excel (.xlsx) creation using `pandas` and `openpyxl`. |
 | [media-downloader](./media-downloader) | Download videos from YouTube, TikTok, Instagram, Twitter/X, and 1000+ sites using `yt-dlp`. Download Spotify tracks, playlists, and albums with metadata using `spotdl`. |
+| [internet-researcher](./internet-researcher) | Internet research using Brave Search API — web search, image search, news search, video search, and LLM-optimized content extraction. |
 
 ## Usage
 When performing tasks related to these file formats, refer to the `SKILL.md` file within the respective folder for detailed API usage, code templates, and best practices.
