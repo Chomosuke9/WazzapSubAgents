@@ -36,8 +36,6 @@ RUN pip install --no-cache-dir --user \
     httpx==0.27.2 \
     docker==7.0.0 \
     python-json-logger==2.0.7 \
-    pytest==7.4.3 \
-    pytest-asyncio==0.21.1 \
     pdfplumber \
     pdf2image \
     pypdf \
@@ -55,7 +53,6 @@ RUN pip install --no-cache-dir --user \
     markdownify \
     "markitdown[pptx]" \
     yt-dlp \
-    spotdl
 
 # Stage 2: Runtime (copy pre-installed packages only)
 FROM python:3.14-slim
