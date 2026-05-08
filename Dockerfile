@@ -52,7 +52,7 @@ RUN pip install --no-cache-dir --user \
     reportlab \
     markdownify \
     "markitdown[pptx]" \
-    yt-dlp \
+    yt-dlp
 
 # Stage 2: Runtime (copy pre-installed packages only)
 FROM python:3.14-slim
