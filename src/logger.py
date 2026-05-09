@@ -1,6 +1,6 @@
 import logging
 import sys
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger import json
 
 
 def get_logger(name: str = "executor-service") -> logging.Logger:
@@ -12,7 +12,7 @@ def get_logger(name: str = "executor-service") -> logging.Logger:
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.INFO)
 
-    formatter = jsonlogger.JsonFormatter(
+    formatter = json.JsonFormatter(
         "%(asctime)s %(levelname)s %(message)s %(name)s",
         rename_fields={"asctime": "timestamp", "levelname": "level"},
         datefmt="%Y-%m-%dT%H:%M:%SZ",

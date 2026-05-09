@@ -1,5 +1,5 @@
 # Stage 1: Build (install dependencies once)
-FROM python:3.14-slim AS builder
+FROM python:3.14-slim AS app-builder
 WORKDIR /app
 
 # Install system deps required for building Python packages
@@ -27,15 +27,14 @@ RUN apt-get update && apt-get install -y \
 
 # Install Python dependencies directly
 RUN pip install --no-cache-dir --user \
-    Flask==3.0.0 \
-    langchain==0.1.20 \
-    langchain-openai==0.1.0 \
-    openai==1.30.0 \
-    python-dotenv==1.0.0 \
-    requests==2.31.0 \
-    httpx==0.27.2 \
-    docker==7.0.0 \
-    python-json-logger==2.0.7 \
+    Flask>=3.1.3 \
+    langchain>=1.2.0 \
+    langchain-openai>=1.2.0 \
+    openai>=2.0.0 \
+    python-dotenv>=1.2.2 \
+    requests>=2.33.1 \
+    docker>=7.1.0 \
+    python-json-logger>=3.3.0 \
     pdfplumber \
     pdf2image \
     pypdf \
@@ -93,7 +92,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-installed Python packages from builder
-COPY --from=builder /root/.local /root/.local
+COPY --from=app-builder /root/.local /root/.local
 
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
