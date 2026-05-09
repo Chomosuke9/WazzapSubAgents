@@ -1,5 +1,6 @@
 import threading
 import time
+import traceback
 from typing import Any, Dict
 
 from flask import Flask, request, jsonify
@@ -165,7 +166,15 @@ def create_app(
                 )
                 session_manager.store_result(session_id, result)
             except Exception as e:
-                logger.error("Agent execution failed", extra={"session_id": session_id, "error": str(e)})
+                logger.error(
+                    "Agent execution failed",
+                    extra={
+                        "session_id": session_id,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "traceback": "".join(traceback.format_tb(e.__traceback__)),
+                    },
+                )
                 session_manager.store_result(
                     session_id,
                     {

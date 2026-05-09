@@ -4,6 +4,19 @@ from dotenv import load_dotenv
 load_dotenv()  # .env — system config, models, and LLM_API_KEY
 load_dotenv(".env.secrets")  # .env.secrets — skill-specific secrets (supplements .env, won't override)
 
+# ---------------------------------------------------------------------------
+# Ensure skill-specific secret env vars always exist in os.environ.
+# Some third-party libraries / code paths may access os.environ[key] directly
+# (rather than os.getenv(key, default)), which raises KeyError when unset.
+# Setting defaults here prevents that regardless of whether .env.secrets
+# exists on disk.
+# ---------------------------------------------------------------------------
+_OPTIONAL_SECRETS = [
+    "BRAVE_SEARCH_API_KEY",
+]
+for _key in _OPTIONAL_SECRETS:
+    os.environ.setdefault(_key, "")
+
 # Required vars
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 if not LLM_API_KEY:
