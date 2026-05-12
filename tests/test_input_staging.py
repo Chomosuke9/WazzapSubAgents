@@ -122,3 +122,63 @@ def test_is_input_path_rejects_other_paths(workdir):
 def test_is_input_path_handles_empty_args():
     assert is_input_path("", "/a") is False
     assert is_input_path("/a", "") is False
+
+
+# ---------------------------------------------------------------------------
+# stage_inputs_from_content
+# ---------------------------------------------------------------------------
+
+import base64 as _base64
+
+from src.input_staging import stage_inputs_from_content
+
+
+def test_stage_inputs_from_content_decodes_base64(workdir):
+    content = b"hello-content"
+    item = {"name": "test.txt", "content_base64": _base64.b64encode(content).decode()}
+    result = stage_inputs_from_content(workdir, [item])
+    assert len(result) == 1
+    assert os.path.basename(result[0]) == "test.txt"
+    assert INPUT_SUBDIR in result[0]
+    with open(result[0], "rb") as f:
+        assert f.read() == content
+
+
+def test_stage_inputs_from_content_empty_returns_empty(workdir):
+    assert stage_inputs_from_content(workdir, []) == []
+
+
+def test_stage_inputs_from_content_handles_collision(workdir):
+    data1 = _base64.b64encode(b"first-content").decode()
+    data2 = _base64.b64encode(b"second-content").decode()
+    result = stage_inputs_from_content(workdir, [
+        {"name": "doc.zip", "content_base64": data1},
+        {"name": "doc.zip", "content_base64": data2},
+    ])
+    assert len(result) == 2
+    names = sorted(os.path.basename(p) for p in result)
+    assert names == ["doc.zip", "doc_1.zip"]
+    # Verify distinct content survived
+    contents = sorted(open(p, "rb").read() for p in result)
+    assert contents == [b"first-content", b"second-content"]
+
+
+def test_stage_inputs_from_content_skips_invalid_base64(workdir):
+    result = stage_inputs_from_content(workdir, [
+        {"name": "bad.bin", "content_base64": "!!invalid!!"},
+    ])
+    assert result == []
+
+
+def test_stage_inputs_from_content_skips_missing_name(workdir):
+    # Should not crash when name is empty or missing
+    result = stage_inputs_from_content(workdir, [
+        {"name": "", "content_base64": _base64.b64encode(b"data").decode()},
+    ])
+    # Either skips (returns []) or handles gracefully — must not raise
+    assert isinstance(result, list)
+
+    result2 = stage_inputs_from_content(workdir, [
+        {"content_base64": _base64.b64encode(b"data").decode()},
+    ])
+    assert isinstance(result2, list)

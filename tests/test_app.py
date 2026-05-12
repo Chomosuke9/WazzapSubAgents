@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -209,3 +210,68 @@ def test_execute_restages_input_files_into_workdir(tmp_path, monkeypatch):
     # Bytes survived the copy.
     with open(staged[0], "rb") as f:
         assert f.read() == b"zip-bytes"
+
+
+def test_execute_decodes_input_files_content(tmp_path, monkeypatch):
+    """When input_files_content is provided, the agent must receive paths
+    inside <workdir>/input/ with the decoded file contents."""
+    import base64
+    import threading
+    from unittest.mock import patch, MagicMock
+
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    docker_mgr = MagicMock()
+    docker_mgr.get_container_url.return_value = "http://localhost:5001"
+    app = create_app(docker_mgr)
+    test_client = app.test_client()
+
+    file_bytes = b"fake-zip-content"
+    encoded = base64.b64encode(file_bytes).decode()
+
+    captured = {}
+    fake_agent = MagicMock()
+
+    def _capture_execute(**kwargs):
+        captured.update(kwargs)
+        return {
+            "session_id": kwargs["session_id"],
+            "success": True,
+            "report": "ok",
+            "output_files": [],
+            "processing_time_sec": 0,
+        }
+
+    fake_agent.execute.side_effect = _capture_execute
+
+    done = threading.Event()
+    orig_thread = threading.Thread
+
+    def waiting_thread(*args, **kwargs):
+        target = kwargs.get("target") or (args[0] if args else None)
+
+        def wrapped():
+            try:
+                if target:
+                    target()
+            finally:
+                done.set()
+
+        kwargs["target"] = wrapped
+        return orig_thread(*args, **kwargs)
+
+    with patch("src.app.ExecutorAgent", return_value=fake_agent), \
+         patch("src.app.threading.Thread", side_effect=waiting_thread):
+        r = test_client.post("/execute", json={
+            "session_id": "sess-b64-input",
+            "instruction": "process this file",
+            "input_files_content": [{"name": "archive.zip", "content_base64": encoded}],
+        })
+        assert r.status_code == 202
+        assert done.wait(timeout=5)
+
+    staged = captured.get("input_files")
+    assert staged and len(staged) == 1
+    assert os.path.basename(staged[0]) == "archive.zip"
+    assert "input" in staged[0]
+    with open(staged[0], "rb") as f:
+        assert f.read() == file_bytes
