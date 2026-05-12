@@ -57,6 +57,13 @@ def _encode_output_files(output_files: list) -> list[dict]:
                 continue
             size = os.path.getsize(path)
             if size > _MAX_INLINE_FILE_BYTES:
+                logger.info(
+                    "omitting %s from output_files_content: size %d bytes exceeds inline limit %d",
+                    os.path.basename(path),
+                    size,
+                    _MAX_INLINE_FILE_BYTES,
+                    extra={"path": path},
+                )
                 continue
             with open(path, "rb") as fh:
                 data = fh.read()
