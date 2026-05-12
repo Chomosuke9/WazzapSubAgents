@@ -122,6 +122,13 @@ def create_app(
         # Single-machine path: copy files from local paths (backward compat)
         # For files whose basename wasn't already provided via content, try path-based staging.
         content_staged_names = {os.path.basename(p) for p in content_staged}
+        for f in input_files:
+            if os.path.basename(f) in content_staged_names:
+                logger.warning(
+                    "input_files basename collision with content-staged file, skipping path-based staging for: %s",
+                    f,
+                    extra={"session_id": session_id, "basename": os.path.basename(f)},
+                )
         path_only_files = [
             f for f in input_files
             if os.path.basename(f) not in content_staged_names

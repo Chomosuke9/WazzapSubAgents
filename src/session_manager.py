@@ -42,6 +42,11 @@ def _encode_output_files(output_files: list) -> list[dict]:
 
     Files missing, not regular, or too large are silently omitted
     (they remain in output_files as paths for single-machine fallback).
+
+    MIME detection uses mimetypes.guess_type plus a first-pass magic-byte
+    sniff for files with absent or misleading extensions. The Agents side
+    (output.py) does more thorough detection on the written file; this sniff
+    improves cross-machine accuracy before the file is base64-encoded.
     """
     result = []
     for path in output_files:
@@ -56,6 +61,13 @@ def _encode_output_files(output_files: list) -> list[dict]:
             with open(path, "rb") as fh:
                 data = fh.read()
             mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            # First-pass magic-byte sniff: improves MIME accuracy for files
+            # with absent or misleading extensions in cross-machine mode.
+            if mime == "application/octet-stream" or mime is None:
+                head = data[:12] if len(data) >= 12 else data
+                sniffed = _sniff_mime_magic(head)
+                if sniffed:
+                    mime = sniffed
             result.append({
                 "name": os.path.basename(path),
                 "content_base64": base64.b64encode(data).decode("ascii"),
@@ -69,6 +81,36 @@ def _encode_output_files(output_files: list) -> list[dict]:
                 extra={"path": path},
             )
     return result
+
+
+def _sniff_mime_magic(head: bytes) -> str | None:
+    """Lightweight magic-byte sniff for common file types.
+
+    Returns a MIME type string if recognized, or None if unknown.
+    Only called when mimetypes.guess_type yields application/octet-stream
+    or None; this is a first-pass improvement for cross-machine accuracy.
+    """
+    if not head:
+        return None
+    if head.startswith(b'%PDF-'):
+        return 'application/pdf'
+    if head.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if head.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if head.startswith(b'GIF87a') or head.startswith(b'GIF89a'):
+        return 'image/gif'
+    if len(head) >= 12 and head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        return 'image/webp'
+    if head.startswith(b'PK\x03\x04'):
+        return 'application/zip'
+    if head.startswith(b'\x1f\x8b'):
+        return 'application/gzip'
+    if head.startswith(b'\x1aE\xdf\xa3'):
+        return 'video/x-matroska'
+    if len(head) >= 8 and head[4:8] == b'ftyp':
+        return 'video/mp4'
+    return None
 
 
 @dataclass

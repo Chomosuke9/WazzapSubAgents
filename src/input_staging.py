@@ -149,6 +149,17 @@ def stage_inputs_from_content(
 
         name = os.path.basename(str(name)) or "unnamed"
 
+        # Quick pre-check: estimated decoded size = len(b64) * 3 // 4.
+        # Avoids materializing a large allocation when the payload is
+        # clearly oversized before calling b64decode.
+        estimated_size = len(content_b64) * 3 // 4
+        if estimated_size > 200 * 1024 * 1024:  # 200 MB hard cap
+            logger.warning(
+                "stage_inputs_from_content: skipping oversized entry %s (~%d bytes)",
+                name, estimated_size,
+            )
+            continue
+
         try:
             data = base64.b64decode(content_b64)
         except Exception as err:
