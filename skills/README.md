@@ -13,6 +13,7 @@ This directory contains specialized instructions and documentation for various d
 | [pptx](./pptx) | Tools and templates for creating and modifying PowerPoint presentations (.pptx) using `pptxgenjs` and `python-pptx`. |
 | [xlsx](./xlsx) | Instructions for spreadsheet manipulation, data analysis, and styled Excel (.xlsx) creation using `pandas` and `openpyxl`. |
 | [media-downloader](./media-downloader) | Download videos from YouTube, TikTok, Instagram, Twitter/X, and 1000+ sites using `yt-dlp`. Download Spotify tracks, playlists, and albums with metadata using `spotdl`. |
+| [image-analyzer](./image-analyzer) | Analyze image files — extract metadata (EXIF), detect dimensions/format/colors, perform OCR text extraction, compare images, and generate structured reports. Uses Pillow, pytesseract, and opencv (sparingly). |
 | [internet-researcher](./internet-researcher) | Internet research using Brave Search API — web search, image search, news search, video search, and LLM-optimized content extraction. |
 
 ## Usage
