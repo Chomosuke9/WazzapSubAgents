@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 import traceback
@@ -10,7 +11,7 @@ from src.concurrency import SubAgentQueue, get_global_queue
 from src.config import config
 from src.container_client import ContainerClient
 from src.docker_manager import DockerManager
-from src.input_staging import stage_inputs_into_workdir
+from src.input_staging import stage_inputs_into_workdir, stage_inputs_from_content
 from src.logger import get_logger
 from src.session_manager import SessionManager
 
@@ -40,6 +41,7 @@ def create_app(
         session_id = data.get("session_id")
         instruction = data.get("instruction")
         input_files = data.get("input_files", [])
+        input_files_content = data.get("input_files_content") or []
         callback_url = data.get("callback_url")
         progress_webhook = data.get("progress_webhook")
         high_quality = data.get("high_quality", False)
@@ -103,18 +105,48 @@ def create_app(
         # before failing. ``workdir`` is rooted in ``WORKDIR_BASE`` which is
         # bind-mounted at the same host/container path, so the copies are
         # always visible inside the container.
-        if input_files:
-            staged_inputs = stage_inputs_into_workdir(session.workdir, input_files)
+        # Cross-machine path: decode base64-inlined files first
+        content_staged: list[str] = []
+        if input_files_content:
+            content_staged = stage_inputs_from_content(session.workdir, input_files_content)
+            logger.info(
+                "Staged input files from base64 content",
+                extra={
+                    "session_id": session_id,
+                    "workdir": session.workdir,
+                    "content_count": len(input_files_content),
+                    "staged_count": len(content_staged),
+                },
+            )
+
+        # Single-machine path: copy files from local paths (backward compat)
+        # For files whose basename wasn't already provided via content, try path-based staging.
+        content_staged_names = {os.path.basename(p) for p in content_staged}
+        for f in input_files:
+            if os.path.basename(f) in content_staged_names:
+                logger.warning(
+                    "input_files basename collision with content-staged file, skipping path-based staging for: %s",
+                    f,
+                    extra={"session_id": session_id, "basename": os.path.basename(f)},
+                )
+        path_only_files = [
+            f for f in input_files
+            if os.path.basename(f) not in content_staged_names
+        ]
+        path_staged: list[str] = []
+        if path_only_files:
+            path_staged = stage_inputs_into_workdir(session.workdir, path_only_files)
             logger.info(
                 "Staged input files into workdir",
                 extra={
                     "session_id": session_id,
                     "workdir": session.workdir,
-                    "input_count": len(input_files),
-                    "staged_count": len(staged_inputs),
+                    "input_count": len(path_only_files),
+                    "staged_count": len(path_staged),
                 },
             )
-            input_files = staged_inputs
+
+        input_files = content_staged + path_staged
 
         def _emit_queued(sid: str, position: int, queue_size: int) -> None:
             session_manager.fire_queue_event(

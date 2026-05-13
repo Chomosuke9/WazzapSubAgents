@@ -24,6 +24,7 @@ The name ``input`` is chosen so it is:
 """
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 from typing import Iterable, List
@@ -100,6 +101,93 @@ def stage_inputs_into_workdir(
             logger.warning(
                 "stage_inputs_into_workdir: copy failed for %s -> %s: %s",
                 src, dest, err,
+            )
+            continue
+        staged.append(os.path.abspath(dest))
+
+    return staged
+
+
+def stage_inputs_from_content(
+    workdir: str,
+    files_content: list[dict],
+) -> list[str]:
+    """Decode base64-encoded file content and write into <workdir>/input/.
+
+    Each entry in files_content must have:
+      - "name": str  (filename to use)
+      - "content_base64": str  (base64-encoded file bytes)
+
+    Returns absolute paths of written files, in input order, omitting
+    entries with missing/invalid fields or decode errors.
+    Used for cross-machine deployment where the caller can't share a
+    filesystem with the sub-agent.
+    """
+    if not files_content:
+        return []
+
+    target_root = os.path.join(workdir, INPUT_SUBDIR)
+    try:
+        os.makedirs(target_root, exist_ok=True)
+    except OSError as err:
+        logger.exception(
+            "stage_inputs_from_content: failed to create %s: %s",
+            target_root, err,
+        )
+        return []
+
+    used_names: set[str] = set()
+    staged: list[str] = []
+    for item in files_content:
+        name = item.get("name") if isinstance(item, dict) else None
+        content_b64 = item.get("content_base64") if isinstance(item, dict) else None
+        if not name or not content_b64:
+            logger.warning(
+                "stage_inputs_from_content: skipping entry with missing name or content_base64",
+            )
+            continue
+
+        name = os.path.basename(str(name)) or "unnamed"
+
+        # Quick pre-check: estimated decoded size = len(b64) * 3 // 4.
+        # Avoids materializing a large allocation when the payload is
+        # clearly oversized before calling b64decode.
+        estimated_size = len(content_b64) * 3 // 4
+        if estimated_size > 200 * 1024 * 1024:  # 200 MB hard cap
+            logger.warning(
+                "stage_inputs_from_content: skipping oversized entry %s (~%d bytes)",
+                name, estimated_size,
+            )
+            continue
+
+        try:
+            data = base64.b64decode(content_b64)
+        except Exception as err:
+            logger.warning(
+                "stage_inputs_from_content: base64 decode failed for %s: %s",
+                name, err,
+            )
+            continue
+
+        # Avoid clobbering when two entries share a basename.
+        final_name = name
+        counter = 1
+        while final_name in used_names or os.path.exists(
+            os.path.join(target_root, final_name)
+        ):
+            stem, ext = os.path.splitext(name)
+            final_name = f"{stem}_{counter}{ext}"
+            counter += 1
+        used_names.add(final_name)
+
+        dest = os.path.join(target_root, final_name)
+        try:
+            with open(dest, "wb") as fh:
+                fh.write(data)
+        except OSError as err:
+            logger.warning(
+                "stage_inputs_from_content: write failed for %s: %s",
+                dest, err,
             )
             continue
         staged.append(os.path.abspath(dest))

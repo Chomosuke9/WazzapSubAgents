@@ -76,3 +76,87 @@ def test_absolute_session_id_is_contained(tmp_path, monkeypatch):
     s = sm.get_or_create("/etc")
     assert s.workdir.startswith(str(tmp_path) + os.sep)
     sm.cleanup_session("/etc")
+
+
+# ---------------------------------------------------------------------------
+# Tests: output_files_content in webhook payload
+# ---------------------------------------------------------------------------
+
+import base64 as _base64
+
+
+def test_store_result_includes_output_files_content(tmp_path, monkeypatch):
+    """store_result must embed base64-encoded output_files_content in webhook."""
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    file_bytes = b"result-data-bytes"
+    tmp_file = tmp_path / "output.txt"
+    tmp_file.write_bytes(file_bytes)
+
+    sm = SessionManager()
+    sm.get_or_create("sess-out-content")
+    sm.set_callback("sess-out-content", "http://localhost:9999/cb", None)
+
+    captured = {}
+
+    def _capture_webhook(url, payload):
+        captured["url"] = url
+        captured["payload"] = payload
+
+    sm._fire_webhook = _capture_webhook
+
+    sm.store_result("sess-out-content", {
+        "success": True,
+        "report": "done",
+        "output_files": [str(tmp_file)],
+    })
+
+    sm.cleanup_session("sess-out-content")
+
+    assert "payload" in captured, "webhook was not fired"
+    result = captured["payload"]["result"]
+    assert "output_files_content" in result
+    content_list = result["output_files_content"]
+    assert isinstance(content_list, list)
+    assert len(content_list) == 1
+    entry = content_list[0]
+    assert "name" in entry
+    assert "content_base64" in entry
+    assert "mime" in entry
+    assert _base64.b64decode(entry["content_base64"]) == file_bytes
+
+
+def test_store_result_omits_large_file_from_content(tmp_path, monkeypatch):
+    """Files exceeding _MAX_INLINE_FILE_BYTES must be omitted from output_files_content."""
+    import src.session_manager as sm_module
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    monkeypatch.setattr(sm_module, "_MAX_INLINE_FILE_BYTES", 4)
+
+    big_bytes = b"12345678"  # 8 bytes > 4 byte limit
+    tmp_file = tmp_path / "big_output.bin"
+    tmp_file.write_bytes(big_bytes)
+
+    sm = SessionManager()
+    sm.get_or_create("sess-large-out")
+    sm.set_callback("sess-large-out", "http://localhost:9999/cb", None)
+
+    captured = {}
+
+    def _capture_webhook(url, payload):
+        captured["payload"] = payload
+
+    sm._fire_webhook = _capture_webhook
+
+    sm.store_result("sess-large-out", {
+        "success": True,
+        "report": "ok",
+        "output_files": [str(tmp_file)],
+    })
+
+    sm.cleanup_session("sess-large-out")
+
+    assert "payload" in captured, "webhook was not fired"
+    result = captured["payload"]["result"]
+    # Large file must be absent from inlined content
+    assert result["output_files_content"] == []
+    # But the original path still present in output_files
+    assert str(tmp_file) in result["output_files"]

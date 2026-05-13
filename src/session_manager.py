@@ -1,3 +1,5 @@
+import base64
+import mimetypes
 import os
 import shutil
 import threading
@@ -24,6 +26,98 @@ _WEBHOOK_RETRY_MAX_BACKOFF = float(os.getenv("WEBHOOK_RETRY_MAX_BACKOFF", "30.0"
 # WazzapAgents bridge is reachable before submitting a task.
 _WEBHOOK_HEALTH_CHECK_ATTEMPTS = int(os.getenv("WEBHOOK_HEALTH_CHECK_ATTEMPTS", "3"))
 _WEBHOOK_HEALTH_CHECK_TIMEOUT = float(os.getenv("WEBHOOK_HEALTH_CHECK_TIMEOUT", "5.0"))
+
+# Maximum file size (bytes) to inline as base64 in the webhook callback
+# for cross-machine deployments. Matches SUBAGENT_MAX_INLINE_FILE_BYTES
+# in WazzapAgents. Override via SUBAGENT_MAX_INLINE_FILE_BYTES env var.
+_MAX_INLINE_FILE_BYTES = int(os.getenv("SUBAGENT_MAX_INLINE_FILE_BYTES", str(50 * 1024 * 1024)))
+
+
+def _encode_output_files(output_files: list) -> list[dict]:
+    """Encode output_files as base64 for cross-machine webhook delivery.
+
+    Returns a list of {name, content_base64, mime} dicts for files that:
+    - exist and are regular files
+    - have size <= _MAX_INLINE_FILE_BYTES
+
+    Files missing, not regular, or too large are silently omitted
+    (they remain in output_files as paths for single-machine fallback).
+
+    MIME detection uses mimetypes.guess_type plus a first-pass magic-byte
+    sniff for files with absent or misleading extensions. The Agents side
+    (output.py) does more thorough detection on the written file; this sniff
+    improves cross-machine accuracy before the file is base64-encoded.
+    """
+    result = []
+    for path in output_files:
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            if not os.path.isfile(path):
+                continue
+            size = os.path.getsize(path)
+            if size > _MAX_INLINE_FILE_BYTES:
+                logger.info(
+                    "omitting %s from output_files_content: size %d bytes exceeds inline limit %d",
+                    os.path.basename(path),
+                    size,
+                    _MAX_INLINE_FILE_BYTES,
+                    extra={"path": path},
+                )
+                continue
+            with open(path, "rb") as fh:
+                data = fh.read()
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            # First-pass magic-byte sniff: improves MIME accuracy for files
+            # with absent or misleading extensions in cross-machine mode.
+            if mime == "application/octet-stream" or mime is None:
+                head = data[:12] if len(data) >= 12 else data
+                sniffed = _sniff_mime_magic(head)
+                if sniffed:
+                    mime = sniffed
+            result.append({
+                "name": os.path.basename(path),
+                "content_base64": base64.b64encode(data).decode("ascii"),
+                "mime": mime,
+            })
+        except Exception as exc:
+            logger.warning(
+                "Failed to inline output file %s: %s",
+                path,
+                exc,
+                extra={"path": path},
+            )
+    return result
+
+
+def _sniff_mime_magic(head: bytes) -> str | None:
+    """Lightweight magic-byte sniff for common file types.
+
+    Returns a MIME type string if recognized, or None if unknown.
+    Only called when mimetypes.guess_type yields application/octet-stream
+    or None; this is a first-pass improvement for cross-machine accuracy.
+    """
+    if not head:
+        return None
+    if head.startswith(b'%PDF-'):
+        return 'application/pdf'
+    if head.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if head.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if head.startswith(b'GIF87a') or head.startswith(b'GIF89a'):
+        return 'image/gif'
+    if len(head) >= 12 and head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        return 'image/webp'
+    if head.startswith(b'PK\x03\x04'):
+        return 'application/zip'
+    if head.startswith(b'\x1f\x8b'):
+        return 'application/gzip'
+    if head.startswith(b'\x1aE\xdf\xa3'):
+        return 'video/x-matroska'
+    if len(head) >= 8 and head[4:8] == b'ftyp':
+        return 'video/mp4'
+    return None
 
 
 @dataclass
@@ -106,10 +200,15 @@ class SessionManager:
                 logger.info("Result stored", extra={"session_id": session_id})
                 if session.callback_url and not session._callback_sent:
                     session._callback_sent = True
+                    output_files = result.get("output_files") or []
+                    output_files_content = _encode_output_files(output_files)
                     payload = {
                         "type": "complete",
                         "session_id": session_id,
-                        "result": result,
+                        "result": {
+                            **result,
+                            "output_files_content": output_files_content,
+                        },
                     }
                     self._fire_webhook(session.callback_url, payload)
 
