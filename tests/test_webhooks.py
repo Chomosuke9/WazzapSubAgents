@@ -97,3 +97,129 @@ if __name__ == "__main__":
     test_polling_unchanged()
     test_progress_logs_stored()
     print("\nAll tests passed!")
+
+
+def test_413_strips_output_files_content_and_retries():
+    """On 413, _fire_webhook strips output_files_content and retries with smaller payload."""
+    import threading
+    from unittest.mock import patch, MagicMock
+    import requests as req_module
+
+    sm = SessionManager()
+
+    # Build a response mock for 413
+    resp_413 = MagicMock()
+    resp_413.status_code = 413
+    resp_413.raise_for_status.side_effect = req_module.exceptions.HTTPError("413")
+
+    # Build a response mock for 200
+    resp_200 = MagicMock()
+    resp_200.status_code = 200
+    resp_200.raise_for_status.return_value = None
+
+    call_payloads = []
+
+    def fake_post(url, json=None, timeout=None):
+        call_payloads.append(json)
+        if len(call_payloads) == 1:
+            return resp_413
+        return resp_200
+
+    class SyncThread:
+        """Runs target synchronously so patches stay active."""
+        def __init__(self, target=None, daemon=None, **kwargs):
+            self._target = target
+
+        def start(self):
+            if self._target:
+                self._target()
+
+    with patch("src.session_manager.requests.post", side_effect=fake_post), \
+         patch("src.session_manager.threading.Thread", SyncThread):
+        sm.get_or_create("sess-413-test")
+        sm.set_callback("sess-413-test", "http://localhost:9999/cb", None)
+        sm.store_result("sess-413-test", {
+            "success": True,
+            "report": "video downloaded",
+            "output_files": [],
+            "output_files_content": [{"name": "video.mp4", "content_base64": "AAAA", "mime": "video/mp4"}],
+        })
+
+    sm.cleanup_session("sess-413-test")
+
+    assert len(call_payloads) >= 2, f"Expected at least 2 requests, got {len(call_payloads)}"
+
+    # First request should have output_files_content (original payload)
+    first_result = call_payloads[0].get("result") or {}
+    assert "output_files_content" in first_result, "First request should have output_files_content"
+
+    # Second request should NOT have output_files_content (stripped)
+    second_result = call_payloads[1].get("result") or {}
+    assert "output_files_content" not in second_result, (
+        f"Second request after 413 must NOT contain output_files_content, got keys: {list(second_result.keys())}"
+    )
+
+
+def test_413_fallback_resets_attempt_counter():
+    """After 413 fallback, attempt counter resets so stripped payload gets full retries."""
+    import threading
+    import src.session_manager as sm_module
+    from unittest.mock import patch, MagicMock
+    import requests as req_module
+
+    sm = SessionManager()
+
+    resp_413 = MagicMock()
+    resp_413.status_code = 413
+    resp_413.raise_for_status.side_effect = req_module.exceptions.HTTPError("413")
+
+    resp_200 = MagicMock()
+    resp_200.status_code = 200
+    resp_200.raise_for_status.return_value = None
+
+    call_count = [0]
+
+    def fake_post(url, json=None, timeout=None):
+        call_count[0] += 1
+        n = call_count[0]
+        if n == 1:
+            return resp_413        # 413 -> strip and reset
+        elif n in (2, 3, 4):
+            # Simulate connection errors on attempts 1-3 after reset
+            raise req_module.exceptions.ConnectionError("connection refused")
+        else:
+            return resp_200        # Eventually succeeds
+
+    class SyncThread:
+        """Runs target synchronously so patches stay active."""
+        def __init__(self, target=None, daemon=None, **kwargs):
+            self._target = target
+
+        def start(self):
+            if self._target:
+                self._target()
+
+    # Lower WEBHOOK_RETRY_MAX before store_result so _fire_webhook captures 5
+    original_max = sm_module._WEBHOOK_RETRY_MAX
+    sm_module._WEBHOOK_RETRY_MAX = 5
+
+    try:
+        with patch("src.session_manager.requests.post", side_effect=fake_post), \
+             patch("src.session_manager.time.sleep"), \
+             patch("src.session_manager.threading.Thread", SyncThread):
+            sm.get_or_create("sess-413-reset")
+            sm.set_callback("sess-413-reset", "http://localhost:9999/cb", None)
+            sm.store_result("sess-413-reset", {
+                "success": True,
+                "report": "done",
+                "output_files_content": [{"name": "f.mp4", "content_base64": "AAA", "mime": "video/mp4"}],
+            })
+    finally:
+        sm_module._WEBHOOK_RETRY_MAX = original_max
+
+    sm.cleanup_session("sess-413-reset")
+
+    # Should have eventually succeeded: 1 (413) + 3 (errors) + 1 (200) = 5 total calls
+    assert call_count[0] == 5, (
+        f"Expected 5 total requests (1x413 + 3xError + 1x200), got {call_count[0]}"
+    )
