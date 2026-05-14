@@ -226,3 +226,69 @@ def test_413_fallback_resets_attempt_counter():
     assert call_count[0] == 5, (
         f"Expected 5 total requests (1x413 + 3xError + 1x200), got {call_count[0]}"
     )
+
+
+def test_413_no_double_strip():
+    """Second 413 after strip does NOT re-strip; guard prevents infinite reset loop."""
+    import src.session_manager as sm_module
+    from unittest.mock import patch, MagicMock
+    import requests as req_module
+
+    sm = SessionManager()
+
+    resp_413 = MagicMock()
+    resp_413.status_code = 413
+    resp_413.raise_for_status.side_effect = req_module.exceptions.HTTPError("413 Too Large")
+
+    call_count = [0]
+    captured_payloads = []
+
+    def fake_post(url, json=None, timeout=None):
+        call_count[0] += 1
+        captured_payloads.append(json)
+        return resp_413  # Always 413
+
+    class SyncThread:
+        def __init__(self, target=None, daemon=None, **kwargs):
+            self._target = target
+        def start(self):
+            if self._target:
+                self._target()
+
+    original_max = sm_module._WEBHOOK_RETRY_MAX
+    sm_module._WEBHOOK_RETRY_MAX = 3
+    try:
+        with patch("src.session_manager.requests.post", side_effect=fake_post), \
+             patch("src.session_manager.time.sleep"), \
+             patch("src.session_manager.threading.Thread", SyncThread):
+            sm.get_or_create("sess-double-413")
+            sm.set_callback("sess-double-413", "http://localhost:9999/cb", None)
+            sm.store_result("sess-double-413", {
+                "success": True,
+                "report": "done",
+                "output_files_content": [{"name": "f.mp4", "content_base64": "AAA", "mime": "video/mp4"}],
+            })
+    finally:
+        sm_module._WEBHOOK_RETRY_MAX = original_max
+
+    sm.cleanup_session("sess-double-413")
+
+    # With max_attempts=3 and one free reset on 413:
+    # attempt 0->1: 413, strip+reset to 0
+    # attempt 0->1: 413 (stripped_on_413=True), backoff
+    # attempt 1->2: 413 (stripped_on_413=True), backoff
+    # attempt 2->3: 413 (stripped_on_413=True), exhausted -> return
+    # Total = 4 calls (1 before reset + 3 after)
+    assert call_count[0] == 4, (
+        f"Expected 4 total calls (1 pre-strip + 3 post-strip exhaustion), got {call_count[0]}"
+    )
+
+    # The second call onward should have output_files_content_dropped=True but NO output_files_content
+    for i, p in enumerate(captured_payloads[1:], start=2):
+        result = p.get("result") or {}
+        assert "output_files_content" not in result, (
+            f"Call {i} must not have output_files_content (strip happened only once)"
+        )
+        assert result.get("output_files_content_dropped") is True, (
+            f"Call {i} must have output_files_content_dropped=True"
+        )
