@@ -158,6 +158,9 @@ def test_413_strips_output_files_content_and_retries():
     assert "output_files_content" not in second_result, (
         f"Second request after 413 must NOT contain output_files_content, got keys: {list(second_result.keys())}"
     )
+    assert second_result.get("output_files_content_dropped") is True, (
+        "Stripped payload must include output_files_content_dropped=True"
+    )
 
 
 def test_413_fallback_resets_attempt_counter():
