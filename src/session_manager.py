@@ -257,9 +257,32 @@ class SessionManager:
         max_backoff = _WEBHOOK_RETRY_MAX_BACKOFF
 
         def _send():
-            for attempt in range(1, max_attempts + 1):
+            payload_to_send = payload
+            stripped_on_413 = False
+            attempt = 0
+            while attempt < max_attempts:
+                attempt += 1
                 try:
-                    response = requests.post(url, json=payload, timeout=30)
+                    response = requests.post(url, json=payload_to_send, timeout=30)
+                    if response.status_code == 413 and not stripped_on_413:
+                        stripped_on_413 = True
+                        result_dict = payload_to_send.get("result") or {}
+                        stripped_result = {k: v for k, v in result_dict.items() if k != "output_files_content"}
+                        stripped_result["output_files_content_dropped"] = True
+                        payload_to_send = {**payload_to_send, "result": stripped_result}
+                        logger.warning(
+                            "Webhook 413: stripping output_files_content and retrying from attempt 1",
+                            extra={"url": url, "attempt": attempt},
+                        )
+                        # Reset to 0 (not 1) because the while loop increments at the top,
+                        # so the stripped payload will start at attempt 1 on the next iteration.
+                        attempt = 0
+                        continue
+                    if response.status_code == 413 and stripped_on_413:
+                        logger.warning(
+                            "Webhook 413 after strip: payload already stripped, retrying with backoff",
+                            extra={"url": url, "attempt": attempt},
+                        )
                     response.raise_for_status()
                     logger.info(
                         "Webhook sent",
