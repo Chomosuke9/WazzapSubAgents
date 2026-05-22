@@ -1,3 +1,4 @@
+import threading
 import time
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
@@ -23,6 +24,7 @@ class ContainerClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.docker_mgr = docker_mgr
+        self._restart_lock = threading.Lock()
 
     def _restart_container(self) -> None:
         """Attempt to restart the executor container via DockerManager.
@@ -31,21 +33,26 @@ class ContainerClient:
         (e.g. OOM-killed), we try to bring it back before retrying the
         request.  The restart itself may fail (e.g. Docker daemon down) and
         that is acceptable — the caller will simply get a connection error.
+
+        A threading lock ensures that concurrent callers do not race to
+        restart the container simultaneously, which could kill a freshly
+        started container that another thread is already using.
         """
         if self.docker_mgr is None:
             return
-        try:
-            logger.warning("Container unreachable, attempting restart...")
-            if not self.docker_mgr.container_running():
-                self.docker_mgr.start_container()
-                self.docker_mgr.wait_for_container_ready(timeout=30)
-                logger.info("Container restarted successfully")
-            else:
-                # Container exists but may be unresponsive — just wait.
-                logger.info("Container still running, waiting for health...")
-                self.docker_mgr.wait_for_container_ready(timeout=15)
-        except Exception as exc:
-            logger.error("Container restart failed", extra={"error": str(exc)})
+        with self._restart_lock:
+            try:
+                logger.warning("Container unreachable, attempting restart...")
+                if not self.docker_mgr.container_running():
+                    self.docker_mgr.start_container()
+                    self.docker_mgr.wait_for_container_ready(timeout=30)
+                    logger.info("Container restarted successfully")
+                else:
+                    # Container exists but may be unresponsive — just wait.
+                    logger.info("Container still running, waiting for health...")
+                    self.docker_mgr.wait_for_container_ready(timeout=15)
+            except Exception as exc:
+                logger.error("Container restart failed", extra={"error": str(exc)})
 
     def _post(self, endpoint: str, payload: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{endpoint}"
