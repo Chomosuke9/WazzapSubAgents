@@ -218,10 +218,8 @@ def create_app(
                     },
                 )
             finally:
-                # Semaphore release must run regardless of success / error /
-                # timeout / cancel. ``release`` is a no-op if we never
-                # acquired (or if acquire cleaned up after itself).
-                subagent_queue.release()
+                if acquired:
+                    subagent_queue.release()
 
         thread = threading.Thread(target=run_agent, daemon=True)
         thread.start()

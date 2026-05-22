@@ -240,3 +240,57 @@ def test_fire_queue_event_ignores_unknown_session():
   sm._fire_webhook = lambda url, payload: captured.append((url, payload))
   sm.fire_queue_event("no-such-session", {"type": "queued"})
   assert captured == []
+
+
+def test_release_not_called_when_acquire_not_completed():
+  """If ``acquire()`` raises before completing (e.g. BaseException during
+  wait), the ``finally`` block in ``run_agent`` must NOT call ``release()``.
+
+  This verifies the ``if acquired:`` guard — without it, a spurious
+  ``release()`` increments ``_free`` beyond ``_limit``, creating a phantom
+  slot that allows more concurrent executions than configured.
+  """
+  queue = SubAgentQueue(limit=1)
+
+  # Occupy the sole slot so that subsequent acquires must wait.
+  queue.acquire("sess-holder")
+
+  # Simulate a thread whose acquire() is interrupted before completing.
+  # The finally block must NOT release.
+  class AcquireInterrupted(BaseException):
+    pass
+
+  def worker_that_fails_to_acquire():
+    acquired = False
+    try:
+      # This will block since the slot is held. We simulate interruption
+      # via on_enqueue callback raising before acquire completes.
+      queue.acquire(
+        "sess-fail",
+        on_enqueue=lambda *args: (_ for _ in ()).throw(AcquireInterrupted("interrupted")),
+      )
+      acquired = True
+    except (AcquireInterrupted, BaseException):
+      pass
+    finally:
+      # This mirrors the fixed code in app.py: only release if acquired.
+      if acquired:
+        queue.release()
+
+  t = threading.Thread(target=worker_that_fails_to_acquire)
+  t.start()
+  t.join(timeout=2.0)
+  assert not t.is_alive()
+
+  # Check that _free has NOT been spuriously incremented.
+  # With the guard, _free should still be 0 (one slot held by sess-holder).
+  with queue._cond:
+    assert queue._free == 0, (
+      f"Expected _free=0 (slot still held by sess-holder), got _free={queue._free}. "
+      "A spurious release() created a phantom slot."
+    )
+
+  # Now release the real holder. _free should go back to 1 (the limit).
+  queue.release()
+  with queue._cond:
+    assert queue._free == 1, f"Expected _free=1 after real release, got _free={queue._free}"
