@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+from langchain_core.messages import HumanMessage
+
 from src.agent import ExecutorAgent
 
 
@@ -369,3 +371,44 @@ def test_end_task_dispatch_normalizes_output_files():
         session_id="s1",
     )
     assert out["output_files"] == ["/tmp/a", "/tmp/b"]
+
+
+@patch("src.agent.ChatOpenAI")
+def test_execute_injects_steering_message(mock_llm_class):
+    client = MagicMock()
+    sm = MagicMock()
+    client.run_bash.return_value = {"stdout": "", "stderr": "", "returncode": 0}
+    mock_llm = MagicMock()
+    mock_llm_class.return_value.bind_tools.return_value = mock_llm
+
+    mock_llm.invoke.side_effect = [
+        _make_response([_bash_tc("search animals", "curl api/animals", "tc-1")]),
+        _make_response([_end_tc(True, "Found cat images", "tc-2")]),
+    ]
+
+    consumed = []
+
+    def _consume(session_id):
+        msgs = ["search for cats instead of animals"]
+        consumed.extend(msgs)
+        return msgs
+
+    sm.consume_steering_messages = _consume
+    sm.append_progress = MagicMock()
+
+    agent = ExecutorAgent(client, sm)
+    result = agent.execute("s-steer", "find animal images", [], "/tmp/work/s-steer")
+    assert result["success"] is True
+    assert result["report"] == "Found cat images"
+    assert consumed == ["search for cats instead of animals"]
+
+    # Verify the second LLM invocation received a message history containing
+    # the steering instruction as a HumanMessage.
+    second_call_args = mock_llm.invoke.call_args_list[1]
+    second_call_messages = second_call_args[0][0]
+    steering_msgs = [
+        m for m in second_call_messages
+        if isinstance(m, HumanMessage) and "[STEERING INSTRUCTION]" in m.content
+    ]
+    assert len(steering_msgs) == 1
+    assert "search for cats" in steering_msgs[0].content

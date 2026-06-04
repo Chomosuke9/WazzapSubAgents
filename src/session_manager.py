@@ -131,6 +131,7 @@ class Session:
     status: str = "active"
     result: Optional[dict] = None
     _callback_sent: bool = field(default=False, repr=False)
+    steering_messages: list[str] = field(default_factory=list)
 
 
 class SessionManager:
@@ -361,6 +362,40 @@ class SessionManager:
             extra={"health_url": health_url},
         )
         return False
+
+    def add_steering_message(self, session_id: str, message: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.status != "active":
+                return False
+            session.steering_messages.append(message)
+            session.last_activity = time.time()
+            logger.info(
+                "Steering message added",
+                extra={"session_id": session_id, "message_preview": message[:200]},
+            )
+            if session.progress_webhook:
+                payload = {
+                    "type": "steering",
+                    "session_id": session_id,
+                    "message_preview": message[:500],
+                }
+                self._fire_webhook(session.progress_webhook, payload)
+            return True
+
+    def consume_steering_messages(self, session_id: str) -> list[str]:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return []
+            messages = list(session.steering_messages)
+            session.steering_messages.clear()
+            if messages:
+                logger.info(
+                    "Steering messages consumed by agent",
+                    extra={"session_id": session_id, "count": len(messages)},
+                )
+            return messages
 
     def get_result(self, session_id: str) -> Optional[dict]:
         with self._lock:

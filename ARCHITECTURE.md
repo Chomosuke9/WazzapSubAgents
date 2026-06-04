@@ -23,6 +23,9 @@ layer with confidence.
  │ (parent orchestrator)│  {session_id, instruction,     │                               │
  │                      │   input_files, callback_url,   │   src/app.py                  │
  │                      │   progress_webhook}            │   :5000                        │
+ │                      │                                │                               │
+ │                      │  HTTP POST /steer              │                               │
+ │                      │  {session_id, instruction}     │                               │
  │                      │◀───────────────────────────────┤   │                            │
  └──────────────────────┘  progress / complete webhooks  │   │                            │
                                                          │   ▼                            │
@@ -156,6 +159,54 @@ The system prompt constructed by `_build_system_prompt`
 - to write output anywhere in the workdir;
 - to only list final **deliverable** files in `end_task(output_files=[...])` —
   not scratch or intermediate files.
+- that mid-task steering instructions may arrive and must be treated as
+  higher-priority directives that override the original instruction.
+
+---
+
+## 3a. Steering — mid-task course correction
+
+A parent orchestrator can **steer** a running sub-agent by sending
+`POST /steer` with `{session_id, instruction}`. This is useful when the
+user refines their request while the agent is already executing (e.g.
+"Cari gambar kucing" instead of "Cari gambar binatang").
+
+### How it works
+
+1. The parent calls `POST /steer` with a new instruction.
+2. `SessionManager.add_steering_message()` appends the instruction to
+   `session.steering_messages` (a simple list protected by the session
+   lock) and fires a `steering` progress webhook.
+3. On the **next iteration** of the agent loop (after the current tool
+   call finishes, before the next LLM invocation),
+   `SessionManager.consume_steering_messages()` drains the list and
+   returns all pending messages.
+4. Each steering message is injected into the conversation as a
+   `HumanMessage` prefixed with `[STEERING INSTRUCTION]:` so the LLM
+   recognises it as a new user directive.
+5. The agent continues the loop with the updated conversation,
+   adjusting its behaviour to the refined instruction.
+
+This is *not* a hard interrupt — a steering message takes effect only
+between agent-loop iterations, not mid-LLM-call or mid-tool-execution.
+The design is intentionally simple: no threading events, no
+cancellation tokens, just a list that the loop polls.
+
+### API
+
+```
+POST /steer
+Content-Type: application/json
+
+{
+  "session_id": "abc123",
+  "instruction": "Instead of searching for animal images, search specifically for cat images."
+}
+```
+
+Returns `200` with `{success: true}` if the session is active and the
+message was queued, or `404` if the session does not exist or is not
+active.
 
 When `end_task` fires, `_resolve_declared_output_files`
 (`src/agent.py`) validates the declared paths: each must (a) exist as

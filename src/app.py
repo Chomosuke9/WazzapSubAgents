@@ -230,6 +230,35 @@ def create_app(
             "message": "Agent starting...",
         }), 202
 
+    @app.post("/steer")
+    def steer():
+        data = request.get_json(force=True)
+        session_id = data.get("session_id")
+        instruction = data.get("instruction")
+
+        if not session_id or not instruction:
+            return jsonify({
+                "success": False,
+                "report": "Missing session_id or instruction",
+            }), 400
+
+        added = session_manager.add_steering_message(session_id, instruction)
+        if not added:
+            return jsonify({
+                "success": False,
+                "report": f"Session {session_id!r} not found or not active",
+            }), 404
+
+        logger.info(
+            "Steering message received",
+            extra={"session_id": session_id, "instruction_preview": instruction[:200]},
+        )
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "message": "Steering message queued",
+        }), 200
+
     @app.get("/sessions/<session_id>/result")
     def get_result(session_id: str):
         """Return the result for a completed session.

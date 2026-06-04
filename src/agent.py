@@ -788,6 +788,18 @@ class ExecutorAgent:
             if end_task_called:
                 break
 
+            # Check for steering messages injected by the parent agent
+            # mid-execution. Each message is appended as a HumanMessage so
+            # the LLM treats it as new user input that modifies/refines the
+            # original instruction.
+            steering_messages = self.session_manager.consume_steering_messages(session_id)
+            for msg in steering_messages:
+                self.logger.info(
+                    "Injecting steering message",
+                    extra={"session_id": session_id, "message_preview": msg[:200]},
+                )
+                messages.append(HumanMessage(content=f"[STEERING INSTRUCTION]: {msg}"))
+
         if final_result is None:
             final_result = {"success": False, "report": "Agent reached max iterations without calling end_task."}
 

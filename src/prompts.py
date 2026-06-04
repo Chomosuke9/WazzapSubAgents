@@ -44,4 +44,6 @@ Workdir: {workdir}
 Input files:
 {files_str}
 
+Steering: You may receive mid-task instructions prefixed with [STEERING INSTRUCTION]. These are new directives from the orchestrating agent that modify or refine your original task. Treat them as higher-priority updates — adjust your approach immediately to align with the new direction, even if it contradicts earlier steps. Do not call end_task until the latest steering instruction is fulfilled.
+
 """

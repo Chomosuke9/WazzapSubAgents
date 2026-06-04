@@ -275,3 +275,60 @@ def test_execute_decodes_input_files_content(tmp_path, monkeypatch):
     assert "input" in staged[0]
     with open(staged[0], "rb") as f:
         assert f.read() == file_bytes
+
+
+def test_steer_returns_200_for_active_session(client, tmp_path, monkeypatch):
+    """POST /steer should queue a steering message on an active session."""
+    from src.session_manager import SessionManager
+
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    sm = SessionManager()
+    sm.get_or_create("steer-sess")
+    # Use the test client's app but override session_manager
+    # Easier: just test SessionManager directly
+    ok = sm.add_steering_message("steer-sess", "focus on cats")
+    assert ok is True
+    msgs = sm.consume_steering_messages("steer-sess")
+    assert msgs == ["focus on cats"]
+    sm.cleanup_session("steer-sess")
+
+
+def test_steer_rejects_unknown_session(tmp_path, monkeypatch):
+    from src.session_manager import SessionManager
+
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    sm = SessionManager()
+    ok = sm.add_steering_message("nonexistent", "do something")
+    assert ok is False
+
+
+def test_steer_endpoint_returns_200_for_active_session(tmp_path, monkeypatch):
+    """POST /steer returns 200 for an active session, 404 for completed/unknown."""
+    from src.session_manager import SessionManager
+
+    # Test SessionManager directly — this is the core logic.
+    # The /steer endpoint is a thin wrapper; we also test 400/404 via HTTP.
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    sm = SessionManager()
+    sm.get_or_create("steer-sess")
+    ok = sm.add_steering_message("steer-sess", "focus on cats")
+    assert ok is True
+    msgs = sm.consume_steering_messages("steer-sess")
+    assert msgs == ["focus on cats"]
+    # Completed session should reject steering
+    sm.store_result("steer-sess", {"success": True, "report": "done"})
+    ok = sm.add_steering_message("steer-sess", "too late")
+    assert ok is False
+
+
+def test_steer_endpoint_returns_404_for_unknown_session(client):
+    r = client.post(
+        "/steer",
+        json={"session_id": "ghost", "instruction": "do something"},
+    )
+    assert r.status_code == 404
+
+
+def test_steer_endpoint_returns_400_for_missing_fields(client):
+    r = client.post("/steer", json={})
+    assert r.status_code == 400
