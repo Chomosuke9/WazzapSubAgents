@@ -132,6 +132,7 @@ class Session:
     result: Optional[dict] = None
     _callback_sent: bool = field(default=False, repr=False)
     steering_messages: list[str] = field(default_factory=list)
+    messages: Optional[list] = None
 
 
 class SessionManager:
@@ -374,13 +375,6 @@ class SessionManager:
                 "Steering message added",
                 extra={"session_id": session_id, "message_preview": message[:200]},
             )
-            if session.progress_webhook:
-                payload = {
-                    "type": "steering",
-                    "session_id": session_id,
-                    "message_preview": message[:500],
-                }
-                self._fire_webhook(session.progress_webhook, payload)
             return True
 
     def consume_steering_messages(self, session_id: str) -> list[str]:
@@ -396,6 +390,29 @@ class SessionManager:
                     extra={"session_id": session_id, "count": len(messages)},
                 )
             return messages
+
+    def store_messages(self, session_id: str, messages: list) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                logger.warning(
+                    "Cannot store messages: session not found",
+                    extra={"session_id": session_id},
+                )
+                return
+            session.messages = messages
+            session.last_activity = time.time()
+            logger.info(
+                "Messages stored",
+                extra={"session_id": session_id, "message_count": len(messages)},
+            )
+
+    def get_messages(self, session_id: str) -> Optional[list]:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.messages is None:
+                return None
+            return list(session.messages)
 
     def get_result(self, session_id: str) -> Optional[dict]:
         with self._lock:

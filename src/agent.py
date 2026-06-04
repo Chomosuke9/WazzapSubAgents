@@ -641,6 +641,50 @@ class ExecutorAgent:
         return last_response, []
 
     # ------------------------------------------------------------------
+    # Message serialization helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _serialize_messages(messages: List[Any]) -> List[Dict[str, Any]]:
+        serialized: List[Dict[str, Any]] = []
+        for msg in messages:
+            entry: Dict[str, Any] = {
+                "role": msg.type,
+                "content": msg.content if isinstance(msg.content, str) else str(msg.content) if msg.content else "",
+            }
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                entry["tool_calls"] = msg.tool_calls
+            if hasattr(msg, "tool_call_id") and msg.tool_call_id:
+                entry["tool_call_id"] = msg.tool_call_id
+            if hasattr(msg, "name") and msg.name:
+                entry["name"] = msg.name
+            serialized.append(entry)
+        return serialized
+
+    @staticmethod
+    def _deserialize_messages(data: List[Dict[str, Any]]) -> List[Any]:
+        messages: List[Any] = []
+        for entry in data:
+            role = entry.get("role", "")
+            content = entry.get("content", "")
+            if role == "system":
+                messages.append(SystemMessage(content=content))
+            elif role in ("human", "user"):
+                messages.append(HumanMessage(content=content))
+            elif role in ("ai", "assistant"):
+                tool_calls = entry.get("tool_calls")
+                if tool_calls:
+                    messages.append(AIMessage(content=content, tool_calls=tool_calls))
+                else:
+                    messages.append(AIMessage(content=content))
+            elif role == "tool":
+                messages.append(ToolMessage(
+                    content=content,
+                    tool_call_id=entry.get("tool_call_id", ""),
+                    name=entry.get("name"),
+                ))
+        return messages
+
+    # ------------------------------------------------------------------
     # Main agent loop
     # ------------------------------------------------------------------
     def execute(
@@ -650,17 +694,57 @@ class ExecutorAgent:
         input_files: List[str],
         workdir: str,
         high_quality: bool = False,
+        previous_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         start_time = time.time()
         # Select LLM based on high_quality flag — store as a local to avoid
         # mutating self and risking a data race if the instance is ever reused.
         llm = self.llm_high if high_quality else self.llm_low
-        self.logger.info("Agent loop starting", extra={"session_id": session_id, "high_quality": high_quality})
+        self.logger.info(
+            "Agent loop starting",
+            extra={
+                "session_id": session_id,
+                "high_quality": high_quality,
+                "previous_session_id": previous_session_id,
+            },
+        )
 
         messages: List[Any] = [
             SystemMessage(content=self._build_system_prompt(input_files, workdir)),
-            HumanMessage(content=instruction),
         ]
+
+        # If this is a correction re-dispatch, carry forward the previous
+        # session's conversation history so the agent can continue where it
+        # left off instead of starting fresh.
+        prev_messages: Optional[List[Dict[str, Any]]] = None
+        if previous_session_id is not None:
+            prev_messages = self.session_manager.get_messages(previous_session_id)
+            if prev_messages is not None:
+                # Strip the old system prompt (index 0) — the new session has
+                # its own system prompt with updated context. Keep everything
+                # from the old conversation: HumanMessages, AIMessages with
+                # tool_calls, ToolMessages, etc.
+                old_messages = self._deserialize_messages(prev_messages)
+                old_conversation = [m for m in old_messages if not isinstance(m, SystemMessage)]
+                messages.extend(old_conversation)
+                self.logger.info(
+                    "Restored previous conversation",
+                    extra={
+                        "session_id": session_id,
+                        "previous_session_id": previous_session_id,
+                        "restored_count": len(old_conversation),
+                    },
+                )
+            else:
+                self.logger.warning(
+                    "Previous session messages not found (may have expired)",
+                    extra={
+                        "session_id": session_id,
+                        "previous_session_id": previous_session_id,
+                    },
+                )
+
+        messages.append(HumanMessage(content=instruction))
 
         max_iterations = 50
         final_result: Optional[Dict[str, Any]] = None
@@ -813,6 +897,20 @@ class ExecutorAgent:
             workdir, declared_output_files, session_id=session_id,
         )
         processing_time = round(time.time() - start_time, 2)
+
+        # Store conversation history for potential correction re-dispatch.
+        # While the agent loop is single-threaded, the session manager's lock
+        # ensures safe access if another thread concurrently reads.
+        try:
+            self.session_manager.store_messages(
+                session_id,
+                self._serialize_messages(messages),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.warning(
+                "Failed to store messages",
+                extra={"session_id": session_id, "error": str(exc)},
+            )
 
         result_payload = {
             "session_id": session_id,

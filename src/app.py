@@ -51,6 +51,8 @@ def create_app(
         else:
             high_quality = bool(high_quality)
 
+        previous_session_id = data.get("previous_session_id")
+
         if not session_id or not instruction:
             return jsonify({"success": False, "report": "Missing session_id or instruction"}), 400
 
@@ -195,6 +197,7 @@ def create_app(
                     input_files=input_files,
                     workdir=session.workdir,
                     high_quality=high_quality,
+                    previous_session_id=previous_session_id,
                 )
                 session_manager.store_result(session_id, result)
             except Exception as e:
