@@ -580,3 +580,45 @@ class TestSanitizeMessages:
                 if found:
                     break
             assert found, f"ToolMessage with tool_call_id={tm.tool_call_id} has no matching AIMessage tool_call"
+
+    def test_deserialize_legacy_format(self):
+        """The legacy flat-dict serialisation format (used before switching
+        to LangChain's built-in serialisation) must still be readable so
+        that sessions stored with the old format can be restored."""
+        agent = _make_agent()
+        legacy_data = [
+            {"role": "system", "content": "You are a helper."},
+            {"role": "human", "content": "List files"},
+            {"role": "ai", "content": "", "tool_calls": [
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1"},
+            ]},
+            {"role": "tool", "content": "file1.txt", "tool_call_id": "call_1", "name": "bash"},
+        ]
+        deserialized = agent._deserialize_messages(legacy_data)
+        assert len(deserialized) == 4
+        assert isinstance(deserialized[0], SystemMessage)
+        assert isinstance(deserialized[1], HumanMessage)
+        assert isinstance(deserialized[2], AIMessage)
+        assert isinstance(deserialized[3], ToolMessage)
+        assert deserialized[2].tool_calls[0]["id"] == "call_1"
+        assert deserialized[3].tool_call_id == "call_1"
+
+    def test_deserialize_langchain_format(self):
+        """Messages serialised with LangChain's messages_to_dict must
+        round-trip cleanly through _deserialize_messages."""
+        from langchain_core.messages import messages_to_dict
+        agent = _make_agent()
+        original = [
+            SystemMessage(content="You are a helper."),
+            HumanMessage(content="List files"),
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1", "type": "tool_call"},
+            ]),
+            ToolMessage(content="file1.txt", tool_call_id="call_1", name="bash"),
+        ]
+        serialized = messages_to_dict(original)
+        deserialized = agent._deserialize_messages(serialized)
+        assert len(deserialized) == 4
+        assert isinstance(deserialized[2], AIMessage)
+        assert isinstance(deserialized[3], ToolMessage)
+        assert deserialized[3].tool_call_id == "call_1"

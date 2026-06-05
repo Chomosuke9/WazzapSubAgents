@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import messages_to_dict, messages_from_dict
 
 from src.config import config
 from src.container_client import ContainerClient
@@ -745,44 +746,47 @@ class ExecutorAgent:
     # ------------------------------------------------------------------
     @staticmethod
     def _serialize_messages(messages: List[Any]) -> List[Dict[str, Any]]:
-        serialized: List[Dict[str, Any]] = []
-        for msg in messages:
-            entry: Dict[str, Any] = {
-                "role": msg.type,
-                "content": msg.content if isinstance(msg.content, str) else str(msg.content) if msg.content else "",
-            }
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                entry["tool_calls"] = msg.tool_calls
-            if hasattr(msg, "tool_call_id") and msg.tool_call_id:
-                entry["tool_call_id"] = msg.tool_call_id
-            if hasattr(msg, "name") and msg.name:
-                entry["name"] = msg.name
-            serialized.append(entry)
-        return serialized
+        return messages_to_dict(messages)
 
     @staticmethod
     def _deserialize_messages(data: List[Dict[str, Any]]) -> List[Any]:
-        messages: List[Any] = []
-        for entry in data:
-            role = entry.get("role", "")
-            content = entry.get("content", "")
-            if role == "system":
-                messages.append(SystemMessage(content=content))
-            elif role in ("human", "user"):
-                messages.append(HumanMessage(content=content))
-            elif role in ("ai", "assistant"):
-                tool_calls = entry.get("tool_calls")
-                if tool_calls:
-                    messages.append(AIMessage(content=content, tool_calls=tool_calls))
-                else:
-                    messages.append(AIMessage(content=content))
-            elif role == "tool":
-                messages.append(ToolMessage(
-                    content=content,
-                    tool_call_id=entry.get("tool_call_id", ""),
-                    name=entry.get("name"),
-                ))
-        return messages
+        if not data:
+            return []
+        try:
+            return messages_from_dict(data)
+        except Exception:
+            # Fallback: handle the legacy serialisation format (flat dicts
+            # with "role" key) that was used before switching to
+            # LangChain's built-in serialisation.  Old stored sessions may
+            # contain this format, so we must be able to read them back.
+            messages: List[Any] = []
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                # If the entry uses LangChain's new format (has "type" key
+                # at the top level), skip it — messages_from_dict already
+                # handled it above or it wasn't the reason we fell back.
+                if "type" in entry and "data" in entry:
+                    continue
+                role = entry.get("role", "")
+                content = entry.get("content", "")
+                if role == "system":
+                    messages.append(SystemMessage(content=content))
+                elif role in ("human", "user"):
+                    messages.append(HumanMessage(content=content))
+                elif role in ("ai", "assistant"):
+                    tool_calls = entry.get("tool_calls")
+                    if tool_calls:
+                        messages.append(AIMessage(content=content, tool_calls=tool_calls))
+                    else:
+                        messages.append(AIMessage(content=content))
+                elif role == "tool":
+                    messages.append(ToolMessage(
+                        content=content,
+                        tool_call_id=entry.get("tool_call_id", ""),
+                        name=entry.get("name"),
+                    ))
+            return messages
 
     # ------------------------------------------------------------------
     # Main agent loop
