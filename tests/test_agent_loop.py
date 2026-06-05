@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.agent import ExecutorAgent
 
@@ -412,3 +412,171 @@ def test_execute_injects_steering_message(mock_llm_class):
     ]
     assert len(steering_msgs) == 1
     assert "search for cats" in steering_msgs[0].content
+
+
+# ---------------------------------------------------------------------------
+# _patch_dangling_tool_calls / _sanitize_messages
+# ---------------------------------------------------------------------------
+
+def _make_agent():
+    """Build a bare ExecutorAgent for unit-testing static helpers."""
+    with patch("src.agent.ChatOpenAI"):
+        return ExecutorAgent(MagicMock(), MagicMock())
+
+
+class TestPatchDanglingToolCalls:
+    def test_patches_all_aimessages_not_just_last(self):
+        """_patch_dangling_tool_calls must add synthetic ToolMessages for
+        EVERY AIMessage with unanswered tool_calls, not just the last one."""
+        messages = [
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1"},
+            ]),
+            AIMessage(content="", tool_calls=[
+                {"name": "end_task", "args": {"success": True, "report": "ok"}, "id": "call_2"},
+            ]),
+        ]
+        ExecutorAgent._patch_dangling_tool_calls(messages)
+        tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+        tc_ids = {m.tool_call_id for m in tool_msgs}
+        assert "call_1" in tc_ids
+        assert "call_2" in tc_ids
+
+    def test_does_not_add_duplicate_if_already_answered(self):
+        messages = [
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1"},
+            ]),
+            ToolMessage(content="output", tool_call_id="call_1", name="bash"),
+        ]
+        ExecutorAgent._patch_dangling_tool_calls(messages)
+        tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+
+    def test_empty_list_is_noop(self):
+        messages: list = []
+        ExecutorAgent._patch_dangling_tool_calls(messages)
+        assert messages == []
+
+
+class TestSanitizeMessages:
+    """Tests for _sanitize_messages which removes orphaned ToolMessages
+    and patches dangling tool_calls."""
+
+    def test_removes_orphaned_tool_message(self):
+        """A ToolMessage with a tool_call_id that does not match any
+        preceding AIMessage's tool_calls must be dropped."""
+        messages = [
+            SystemMessage(content="system"),
+            HumanMessage(content="hello"),
+            AIMessage(content="thinking...", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1"},
+            ]),
+            ToolMessage(content="output", tool_call_id="call_1", name="bash"),
+            AIMessage(content="done"),
+            ToolMessage(content="orphan", tool_call_id="call_orphan", name="bash"),
+            HumanMessage(content="next"),
+        ]
+        sanitized = ExecutorAgent._sanitize_messages(messages)
+        tool_msgs = [m for m in sanitized if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_call_id == "call_1"
+
+    def test_keeps_valid_tool_messages(self):
+        messages = [
+            HumanMessage(content="hello"),
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1"},
+            ]),
+            ToolMessage(content="output", tool_call_id="call_1", name="bash"),
+        ]
+        sanitized = ExecutorAgent._sanitize_messages(messages)
+        tool_msgs = [m for m in sanitized if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_call_id == "call_1"
+
+    def test_patches_dangling_tool_calls(self):
+        messages = [
+            HumanMessage(content="hello"),
+            AIMessage(content="", tool_calls=[
+                {"name": "end_task", "args": {"success": True, "report": "ok"}, "id": "call_1"},
+            ]),
+        ]
+        sanitized = ExecutorAgent._sanitize_messages(messages)
+        tool_msgs = [m for m in sanitized if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_call_id == "call_1"
+
+    def test_resets_ai_tool_call_ids_after_non_ai_message(self):
+        """After a HumanMessage (non-AI, non-Tool), ai_tool_call_ids must
+        be reset so that a subsequent ToolMessage is correctly identified
+        as orphaned if it doesn't follow its owning AIMessage."""
+        messages = [
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1"},
+            ]),
+            ToolMessage(content="output", tool_call_id="call_1", name="bash"),
+            HumanMessage(content="next instruction"),
+            ToolMessage(content="orphan", tool_call_id="call_1", name="bash"),
+        ]
+        sanitized = ExecutorAgent._sanitize_messages(messages)
+        tool_msgs = [m for m in sanitized if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_call_id == "call_1"
+
+    def test_multi_turn_conversation_preserved(self):
+        """A realistic multi-turn conversation with all tool calls answered
+        should pass through unchanged."""
+        messages = [
+            HumanMessage(content="list files"),
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_1"},
+            ]),
+            ToolMessage(content="file1.txt\nfile2.txt", tool_call_id="call_1", name="bash"),
+            AIMessage(content="", tool_calls=[
+                {"name": "end_task", "args": {"success": True, "report": "done"}, "id": "call_2"},
+            ]),
+            ToolMessage(content="Task complete", tool_call_id="call_2", name="end_task"),
+        ]
+        sanitized = ExecutorAgent._sanitize_messages(messages)
+        assert len(sanitized) == len(messages)
+
+    def test_empty_list_returns_empty(self):
+        sanitized = ExecutorAgent._sanitize_messages([])
+        assert sanitized == []
+
+    def test_serialization_roundtrip_with_sanitization(self):
+        """Verify that _serialize_messages → _deserialize_messages →
+        _sanitize_messages produces a valid message list."""
+        agent = _make_agent()
+        original_messages = [
+            SystemMessage(content="You are a helpful assistant."),
+            HumanMessage(content="List files"),
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "ls"}, "id": "call_abc"},
+            ]),
+            ToolMessage(content="file1.txt\nfile2.txt", tool_call_id="call_abc", name="bash"),
+            HumanMessage(content="Now check disk"),
+            AIMessage(content="", tool_calls=[
+                {"name": "bash", "args": {"command": "df"}, "id": "call_def"},
+                {"name": "end_task", "args": {"success": True, "report": "done"}, "id": "call_ghi"},
+            ]),
+        ]
+        serialized = agent._serialize_messages(original_messages)
+        deserialized = agent._deserialize_messages(serialized)
+        sanitized = ExecutorAgent._sanitize_messages(deserialized)
+        tool_msgs = [m for m in sanitized if isinstance(m, ToolMessage)]
+        ai_msgs_with_tc = [m for m in sanitized if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)]
+        assert len(ai_msgs_with_tc) == 2
+        assert len(tool_msgs) >= 1
+        for tm in tool_msgs:
+            found = False
+            for ai in ai_msgs_with_tc:
+                for tc in ai.tool_calls:
+                    tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                    if tc_id == tm.tool_call_id:
+                        found = True
+                        break
+                if found:
+                    break
+            assert found, f"ToolMessage with tool_call_id={tm.tool_call_id} has no matching AIMessage tool_call"

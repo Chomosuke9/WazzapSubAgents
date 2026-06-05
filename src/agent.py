@@ -504,48 +504,98 @@ class ExecutorAgent:
 
         The OpenAI API requires that every tool_call in an AIMessage has a
         matching ToolMessage with the same tool_call_id.  When the agent
-        loop exits early (end_task, stuck-loop detector, LLM error), the
-        last AIMessage may include tool_calls that were never answered.
-        Calling this before storing/restoring the history prevents a 400
-        error on re-invoke with ``previous_session_id``.
+        loop exits early (end_task, stuck-loop detector, LLM error), an
+        AIMessage may include tool_calls that never received ToolMessage
+        responses.  Calling this before storing/restoring the history prevents a
+        400 error on re-invoke with ``previous_session_id``.
+
+        This method processes ALL AIMessages (not just the last one) because
+        restored conversation history may contain earlier AIMessages with
+        unanswered tool_calls that were not patched in a prior run.
         """
         if not messages:
             return
 
-        # Collect all tool_call_ids that already have a ToolMessage response.
         answered_ids: set[str] = set()
         for msg in messages:
             if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", None):
                 answered_ids.add(msg.tool_call_id)
 
-        # Walk messages from the end to find the last AIMessage with tool_calls
-        # that has unanswered entries.  We only need to patch the tail — any
-        # earlier AIMessages with tool_calls are followed by their answers
-        # (otherwise the LLM would have errored on the next turn already).
-        # Append synthetic ToolMessages for all unanswered ids in that tail
-        # AIMessage.
-        for msg in reversed(messages):
+        for msg in messages:
+            if not isinstance(msg, AIMessage):
+                continue
+            tool_calls = getattr(msg, "tool_calls", None) or []
+            unanswered = [
+                tc for tc in tool_calls
+                if (tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
+                not in answered_ids
+            ]
+            for tc in unanswered:
+                if isinstance(tc, dict):
+                    tc_id = tc.get("id", "")
+                    tc_name = tc.get("name", "")
+                else:
+                    tc_id = getattr(tc, "id", "")
+                    tc_name = getattr(tc, "name", "")
+                synthetic = ToolMessage(
+                    content="[Task ended — this tool call was not executed because the agent finished its run.]",
+                    tool_call_id=tc_id,
+                    name=tc_name,
+                )
+                messages.append(synthetic)
+                answered_ids.add(tc_id)
+
+    @staticmethod
+    def _sanitize_messages(messages: List[Any]) -> List[Any]:
+        """Remove orphaned ToolMessages and ensure every ToolMessage follows
+        an AIMessage with a matching tool_call_id.
+
+        The OpenAI API rejects request payloads where a ``tool`` role message
+        does not immediately follow an ``assistant`` message that includes the
+        corresponding ``tool_calls`` entry.  This can happen when conversation
+        history is restored from a previous session (via
+        ``previous_session_id``) and the serialisation/deserialisation round-
+        trip loses the ``tool_calls`` attribute on an AIMessage, or when an
+        earlier version of ``_patch_dangling_tool_calls`` only patched the
+        tail rather than every AIMessage.
+
+        This method returns a *new* list with orphaned ToolMessages removed
+        and dangling tool_calls patched (via ``_patch_dangling_tool_calls``).
+        """
+        if not messages:
+            return list(messages)
+
+        sanitized: List[Any] = []
+        ai_tool_call_ids: set[str] = set()
+
+        for msg in messages:
             if isinstance(msg, AIMessage):
+                ai_tool_call_ids = set()
                 tool_calls = getattr(msg, "tool_calls", None) or []
-                unanswered = [
-                    tc for tc in tool_calls
-                    if (tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
-                    not in answered_ids
-                ]
-                if unanswered:
-                    for tc in unanswered:
-                        if isinstance(tc, dict):
-                            tc_id = tc.get("id", "")
-                            tc_name = tc.get("name", "")
-                        else:
-                            tc_id = getattr(tc, "id", "")
-                            tc_name = getattr(tc, "name", "")
-                        messages.append(ToolMessage(
-                            content="[Task ended — this tool call was not executed because the agent finished its run.]",
-                            tool_call_id=tc_id,
-                            name=tc_name,
-                        ))
-                break
+                for tc in tool_calls:
+                    if isinstance(tc, dict):
+                        tc_id = tc.get("id")
+                    else:
+                        tc_id = getattr(tc, "id", None)
+                    if tc_id:
+                        ai_tool_call_ids.add(tc_id)
+                sanitized.append(msg)
+            elif isinstance(msg, ToolMessage):
+                tc_id = getattr(msg, "tool_call_id", None)
+                if tc_id and tc_id in ai_tool_call_ids:
+                    sanitized.append(msg)
+                else:
+                    logger.warning(
+                        "Dropping orphaned ToolMessage (tool_call_id=%s)",
+                        tc_id,
+                        extra={"tool_call_id": tc_id},
+                    )
+            else:
+                ai_tool_call_ids = set()
+                sanitized.append(msg)
+
+        ExecutorAgent._patch_dangling_tool_calls(sanitized)
+        return sanitized
 
     @staticmethod
     def _normalize_tool_calls(response: Any) -> List[Dict[str, Any]]:
@@ -776,6 +826,12 @@ class ExecutorAgent:
                 # tool_calls, ToolMessages, etc.
                 old_messages = self._deserialize_messages(prev_messages)
                 old_conversation = [m for m in old_messages if not isinstance(m, SystemMessage)]
+                # Sanitise the restored history to remove orphaned ToolMessages
+                # and patch any dangling tool_calls.  The serialisation /
+                # deserialisation round-trip can lose tool_calls on AIMessages,
+                # leaving ToolMessages that reference non-existent
+                # tool_call_ids and trigger a 400 from the API.
+                old_conversation = self._sanitize_messages(old_conversation)
                 messages.extend(old_conversation)
                 self.logger.info(
                     "Restored previous conversation",
@@ -950,15 +1006,12 @@ class ExecutorAgent:
 
         # Ensure the conversation history is well-formed before storing:
         # the OpenAI API requires that every AIMessage.tool_calls entry has a
-        # matching ToolMessage with the same tool_call_id.  When the agent
-        # loop exits via end_task or the stuck-loop detector, the last
-        # AIMessage may have tool_calls that never received ToolMessage
-        # responses (because we broke out of the loop before processing
-        # them).  Restoring such a history under previous_session_id would
-        # cause a 400 error: "messages with role 'tool' must be a response
-        # to a preceeding message with 'tool_calls'".  Patch by appending
-        # synthetic ToolMessages for any unmatched tool_call ids.
-        self._patch_dangling_tool_calls(messages)
+        # matching ToolMessage with the same tool_call_id, and that no
+        # ToolMessage exists without a preceding AIMessage that declares the
+        # matching tool_call.  Patch dangling tool_calls and remove orphaned
+        # ToolMessages so that restoring this history under
+        # previous_session_id does not trigger a 400 error.
+        messages = self._sanitize_messages(messages)
 
         # Store conversation history for potential correction re-dispatch.
         # While the agent loop is single-threaded, the session manager's lock
