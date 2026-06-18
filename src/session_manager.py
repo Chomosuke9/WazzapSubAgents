@@ -148,8 +148,7 @@ class SessionManager:
             if session_id in self._sessions:
                 session = self._sessions[session_id]
                 session.last_activity = time.time()
-                return session
-            # WORKDIR_BASE must match the executor sidecar so files written by
+                return session            # WORKDIR_BASE must match the executor sidecar so files written by
             # bash/python tools land in the same place we collect output_files
             # from. Defaults to /tmp/work for backwards compatibility, but
             # docker-compose overrides it to a host-shared path so WazzapAgents
@@ -183,6 +182,17 @@ class SessionManager:
             self._sessions[session_id] = session
             logger.info("Session created", extra={"session_id": session_id, "workdir": workdir})
             return session
+
+    def get_session(self, session_id: str) -> Optional[Session]:
+        """Return an existing session without creating one.
+
+        Used by ``/steer`` to reach the running session's ``workdir`` so
+        steered input files can be staged into it. Unlike
+        :meth:`get_or_create`, a missing session yields ``None`` instead of
+        materialising a new workdir for a session that was never submitted.
+        """
+        with self._lock:
+            return self._sessions.get(session_id)
 
     def set_callback(self, session_id: str, callback_url: Optional[str], progress_webhook: Optional[str]) -> None:
         with self._lock:

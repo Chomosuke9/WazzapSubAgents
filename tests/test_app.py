@@ -332,3 +332,85 @@ def test_steer_endpoint_returns_404_for_unknown_session(client):
 def test_steer_endpoint_returns_400_for_missing_fields(client):
     r = client.post("/steer", json={})
     assert r.status_code == 400
+
+
+def _app_with_session(tmp_path, session_id):
+    """Build an app with an injected SessionManager holding one active
+    session, plus return the manager and session for assertions."""
+    from src.session_manager import SessionManager
+
+    sm = SessionManager()
+    session = sm.get_or_create(session_id)
+    docker_mgr = MagicMock()
+    docker_mgr.get_container_url.return_value = "http://localhost:5001"
+    app = create_app(docker_mgr, session_manager=sm)
+    return app.test_client(), sm, session
+
+
+def test_steer_stages_base64_files_into_workdir_and_lists_them(tmp_path, monkeypatch):
+    """POST /steer with input_files_content must stage the file into the
+    running session's workdir/input and reference its path in the steering
+    message the agent will consume."""
+    import base64
+
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    client, sm, session = _app_with_session(tmp_path, "steer-files")
+
+    content = base64.b64encode(b"hello steered file").decode("ascii")
+    r = client.post(
+        "/steer",
+        json={
+            "session_id": "steer-files",
+            "instruction": "use this new file",
+            "input_files_content": [{"name": "note.txt", "content_base64": content}],
+        },
+    )
+    assert r.status_code == 200
+    assert r.get_json()["staged_file_count"] == 1
+
+    staged = os.path.join(session.workdir, "input", "note.txt")
+    assert os.path.isfile(staged)
+    with open(staged) as fh:
+        assert fh.read() == "hello steered file"
+
+    # The steering message the agent receives must mention the instruction
+    # AND the staged file path so the agent knows the file exists.
+    msgs = sm.consume_steering_messages("steer-files")
+    assert len(msgs) == 1
+    assert "use this new file" in msgs[0]
+    assert "note.txt" in msgs[0]
+    sm.cleanup_session("steer-files")
+
+
+def test_steer_without_files_keeps_plain_instruction(tmp_path, monkeypatch):
+    """A file-less /steer call must behave exactly as before: the steering
+    message is the raw instruction with no NEW INPUT FILES block."""
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    client, sm, session = _app_with_session(tmp_path, "steer-plain")
+
+    r = client.post(
+        "/steer",
+        json={"session_id": "steer-plain", "instruction": "focus on cats"},
+    )
+    assert r.status_code == 200
+    assert r.get_json()["staged_file_count"] == 0
+    msgs = sm.consume_steering_messages("steer-plain")
+    assert msgs == ["focus on cats"]
+    sm.cleanup_session("steer-plain")
+
+
+def test_steer_with_files_on_unknown_session_returns_404(client):
+    """Files supplied for a session that doesn't exist must not 200 — the
+    canonical not-found contract is preserved."""
+    import base64
+
+    content = base64.b64encode(b"data").decode("ascii")
+    r = client.post(
+        "/steer",
+        json={
+            "session_id": "ghost",
+            "instruction": "do something",
+            "input_files_content": [{"name": "x.txt", "content_base64": content}],
+        },
+    )
+    assert r.status_code == 404

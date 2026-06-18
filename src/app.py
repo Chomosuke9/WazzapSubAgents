@@ -21,11 +21,16 @@ logger = get_logger(__name__)
 def create_app(
     docker_mgr: DockerManager,
     queue: SubAgentQueue | None = None,
+    session_manager: SessionManager | None = None,
 ) -> Flask:
     app = Flask(__name__)
     container_url = docker_mgr.get_container_url()
     container_client = ContainerClient(container_url, docker_mgr=docker_mgr)
-    session_manager = SessionManager(idle_timeout=config["session_idle_timeout"])
+    # Tests may inject a SessionManager so they can pre-create an active
+    # session (e.g. to exercise /steer file staging) without spinning up the
+    # full /execute path. Defaults to a fresh manager for production.
+    if session_manager is None:
+        session_manager = SessionManager(idle_timeout=config["session_idle_timeout"])
     # Global FIFO gate limiting concurrent agent executions (default 1).
     # Tests may inject a dedicated queue to avoid leaking process-global
     # state between cases.
@@ -238,6 +243,8 @@ def create_app(
         data = request.get_json(force=True)
         session_id = data.get("session_id")
         instruction = data.get("instruction")
+        input_files = data.get("input_files", []) or []
+        input_files_content = data.get("input_files_content") or []
 
         if not session_id or not instruction:
             return jsonify({
@@ -245,7 +252,53 @@ def create_app(
                 "report": "Missing session_id or instruction",
             }), 400
 
-        added = session_manager.add_steering_message(session_id, instruction)
+        # Stage any files supplied with this steering instruction into the
+        # RUNNING session's workdir, exactly like /execute does at submit
+        # time. Without this, files referenced mid-task never reach the
+        # sub-agent (the original system prompt's file list was fixed at
+        # submit time). ``get_session`` does NOT create a session, so a
+        # missing/never-submitted session leaves ``staged`` empty and the
+        # add_steering_message call below returns the canonical 404.
+        staged: list[str] = []
+        session = session_manager.get_session(session_id)
+        if session is not None and (input_files or input_files_content):
+            content_staged: list[str] = []
+            if input_files_content:
+                content_staged = stage_inputs_from_content(session.workdir, input_files_content)
+            # Avoid double-staging a file that already arrived via base64.
+            content_staged_names = {os.path.basename(p) for p in content_staged}
+            path_only_files = [
+                f for f in input_files
+                if os.path.basename(f) not in content_staged_names
+            ]
+            path_staged: list[str] = []
+            if path_only_files:
+                path_staged = stage_inputs_into_workdir(session.workdir, path_only_files)
+            staged = content_staged + path_staged
+            if staged:
+                logger.info(
+                    "Staged steered input files",
+                    extra={
+                        "session_id": session_id,
+                        "workdir": session.workdir,
+                        "staged_count": len(staged),
+                    },
+                )
+
+        # The agent's original system prompt only lists files known at submit
+        # time, so newly-steered files must be announced in the steering text
+        # itself (with their in-workdir paths) for the agent to read them.
+        steer_message = instruction
+        if staged:
+            files_block = "\n".join(f"- {p}" for p in staged)
+            steer_message = (
+                f"{instruction}\n\n"
+                "[NEW INPUT FILES — provided with this steering instruction, "
+                "read them from these paths]:\n"
+                f"{files_block}"
+            )
+
+        added = session_manager.add_steering_message(session_id, steer_message)
         if not added:
             return jsonify({
                 "success": False,
@@ -254,12 +307,17 @@ def create_app(
 
         logger.info(
             "Steering message received",
-            extra={"session_id": session_id, "instruction_preview": instruction[:200]},
+            extra={
+                "session_id": session_id,
+                "instruction_preview": instruction[:200],
+                "staged_file_count": len(staged),
+            },
         )
         return jsonify({
             "success": True,
             "session_id": session_id,
             "message": "Steering message queued",
+            "staged_file_count": len(staged),
         }), 200
 
     @app.get("/sessions/<session_id>/result")
