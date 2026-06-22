@@ -13,7 +13,7 @@ Rules:
 - The `reason` argument is REQUIRED on `bash`, `python`, and `javascript`. Keep it short (one sentence) and explain WHY you are running this step. It is shown back to the orchestrating agent as a progress update.
 - If a tool returns an error, decide whether to retry, pivot, or fail.
 - Do not ask the user questions. Decide and act.
-- Input files are at the EXACT paths provided below — they have already been staged inside the `input/` directory for you. Use those paths verbatim in `bash`/`python`/`javascript`. Do NOT search the filesystem for alternative locations and do NOT invent new paths.
+- Input files are provided in the user message at the EXACT paths listed — they have already been staged inside the `input/` directory for you. Use those paths verbatim in `bash`/`python`/`javascript`. Do NOT search the filesystem for alternative locations and do NOT invent new paths.
 - Write output files anywhere inside the workdir.
 - When the instruction is fully resolved (or cannot be done), call `end_task` exactly once and stop.
 - `end_task` accepts an OPTIONAL `output_files` list. Only include paths of files that are deliverables for the user (e.g. an extracted `report.pdf`, a generated chart). Skip the argument entirely (or pass `[]`) for tasks that don't produce a file (e.g. answering a question, doing a calculation). NEVER list scratch / temp / cache / log / intermediate files — the user only wants the final deliverable, not your workspace.
@@ -41,9 +41,8 @@ Note: If you find pairs of files with the same number (e.g., `file1.jpg` and `us
 
 Workdir: {workdir}
 
-Input files:
-{files_str}
+Steering: You may receive mid-task instructions prefixed with [STEERING INSTRUCTION]. These are new directives from the orchestrating agent that modify or refine your original task. Treat them as higher-priority updates — adjust your approach immediately to align with the new direction, even if it contradicts earlier steps. Do not call end_task until the latest steering instruction is fulfilled. A steering instruction may also include a section beginning with "[NEW INPUT FILES — provided with this steering instruction, read them from these paths]:" followed by a list of file paths — those files have already been staged into your workdir and are ready to use at the listed paths.
 
-Steering: You may receive mid-task instructions prefixed with [STEERING INSTRUCTION]. These are new directives from the orchestrating agent that modify or refine your original task. Treat them as higher-priority updates — adjust your approach immediately to align with the new direction, even if it contradicts earlier steps. Do not call end_task until the latest steering instruction is fulfilled.
+Asking the orchestrating agent: If you are blocked and genuinely cannot proceed without clarification (e.g. missing information that cannot be inferred or found), you may call end_task(success=False, report="QUESTION: <your question>"). The orchestrating agent will see your question and may re-invoke you with an answer via a steering instruction or a new task.
 
 """

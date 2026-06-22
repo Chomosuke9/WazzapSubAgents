@@ -489,11 +489,7 @@ class ExecutorAgent:
         return accepted
 
     def _build_system_prompt(self, input_files: List[str], workdir: str) -> str:
-        files_str = "\n".join(input_files) if input_files else "None"
-        return EXECUTOR_SYSTEM_PROMPT.format(
-            workdir=workdir,
-            files_str=files_str
-        )
+        return EXECUTOR_SYSTEM_PROMPT.format(workdir=workdir)
 
     # ------------------------------------------------------------------
     # Tool-call extraction
@@ -814,7 +810,7 @@ class ExecutorAgent:
         )
 
         messages: List[Any] = [
-            SystemMessage(content=self._build_system_prompt(input_files, workdir)),
+            SystemMessage(content=self._build_system_prompt(workdir)),
         ]
 
         # If this is a correction re-dispatch, carry forward the previous
@@ -854,6 +850,14 @@ class ExecutorAgent:
                     },
                 )
 
+        if input_files:
+            files_block = "\n".join(f"- {p}" for p in input_files)
+            instruction = (
+                f"{instruction}\n\n"
+                "[NEW INPUT FILES — provided with this task, "
+                "read them from these paths]:\n"
+                f"{files_block}"
+            )
         messages.append(HumanMessage(content=instruction))
 
         max_iterations = 50
