@@ -488,7 +488,7 @@ class ExecutorAgent:
 
         return accepted
 
-    def _build_system_prompt(self, input_files: List[str], workdir: str) -> str:
+    def _build_system_prompt(self, workdir: str) -> str:
         return EXECUTOR_SYSTEM_PROMPT.format(workdir=workdir)
 
     # ------------------------------------------------------------------
