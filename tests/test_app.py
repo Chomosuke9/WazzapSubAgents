@@ -74,10 +74,11 @@ def test_execute_normalizes_high_quality_bool(client):
         (False, False),
     ]
 
-    for raw_value, expected in cases:
+    for case_index, (raw_value, expected) in enumerate(cases):
+        session_id = f"s-bool-{case_index}"
         fake_agent = MagicMock()
         fake_agent.execute.return_value = {
-            "session_id": "s-bool",
+            "session_id": session_id,
             "success": True,
             "report": "ok",
             "output_files": [],
@@ -111,7 +112,7 @@ def test_execute_normalizes_high_quality_bool(client):
             r = client.post(
                 "/execute",
                 json={
-                    "session_id": "s-bool",
+                    "session_id": session_id,
                     "instruction": "do it",
                     "high_quality": raw_value,
                 },
@@ -365,7 +366,7 @@ def test_steer_stages_base64_files_into_workdir_and_lists_them(tmp_path, monkeyp
             "input_files_content": [{"name": "note.txt", "content_base64": content}],
         },
     )
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert r.get_json()["staged_file_count"] == 1
 
     staged = os.path.join(session.workdir, "input", "note.txt")
@@ -392,7 +393,7 @@ def test_steer_without_files_keeps_plain_instruction(tmp_path, monkeypatch):
         "/steer",
         json={"session_id": "steer-plain", "instruction": "focus on cats"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert r.get_json()["staged_file_count"] == 0
     msgs = sm.consume_steering_messages("steer-plain")
     assert msgs == ["focus on cats"]

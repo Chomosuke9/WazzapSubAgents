@@ -25,8 +25,11 @@ RUN apt-get update && apt-get install -y \
     libcairo2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies directly
-RUN pip install --no-cache-dir --user \
+# Install Python dependencies into a world-readable virtualenv. Executor
+# commands run under per-session UIDs and cannot traverse /root/.local.
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+RUN pip install --no-cache-dir \
     Flask>=3.1.3 \
     langchain>=1.2.0 \
     langchain-openai>=1.2.0 \
@@ -88,14 +91,14 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     fonts-dejavu \
     fontconfig \
+    acl \
     && fc-cache -f -v \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-installed Python packages from builder
-COPY --from=app-builder /root/.local /root/.local
+COPY --from=app-builder /opt/venv /opt/venv
 
-# Make sure scripts in .local are usable
-ENV PATH=/root/.local/bin:$PATH
+ENV PATH=/opt/venv/bin:$PATH
 ENV NODE_PATH=/usr/lib/node_modules
 
 

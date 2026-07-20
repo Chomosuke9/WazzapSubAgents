@@ -1,6 +1,15 @@
+import hashlib
+import hmac
+import json
 import os
+from pathlib import Path
+import re
 import subprocess
+import sys
+import threading
 import uuid
+from collections import OrderedDict
+from typing import Callable
 
 from flask import Flask, request, jsonify
 
@@ -11,6 +20,33 @@ logger = get_logger("executor-server")
 # Execution timeout upper bound — prevents a single request from holding a
 # Flask thread for an unbounded amount of time.
 MAX_TIMEOUT = 600  # 10 minutes
+MAX_REQUEST_BYTES = int(os.getenv("EXECUTOR_MAX_REQUEST_BYTES", str(2 * 1024 * 1024)))
+MAX_CACHED_RESULTS = int(os.getenv("EXECUTOR_MAX_CACHED_RESULTS", "1000"))
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,199}$")
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$")
+REQUIRE_UID_ISOLATION = os.getenv(
+    "EXECUTOR_REQUIRE_UID_ISOLATION", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+EXECUTOR_PARENT_UID = int(os.getenv("EXECUTOR_PARENT_UID", "0"))
+if EXECUTOR_PARENT_UID < 0:
+    raise ValueError("EXECUTOR_PARENT_UID must be zero or a positive integer")
+TOOL_ENV_ALLOWLIST = {
+    "PATH", "NODE_PATH", "LANG", "LC_ALL", "TZ",
+    "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "PATHEXT", "WINDIR",
+}
+TOOL_ENV_PASSTHROUGH = {
+    name.strip()
+    for name in os.getenv(
+        "EXECUTOR_TOOL_ENV_PASSTHROUGH", "BRAVE_SEARCH_API_KEY"
+    ).split(",")
+    if name.strip()
+}
+TOOL_ENV_BLOCKLIST = {
+    "EXECUTOR_API_TOKEN",
+    "LLM_API_KEY",
+    "SUBAGENT_WEBHOOK_TOKEN",
+}
 
 
 def _clamp_timeout(timeout, default: int = 10) -> int | float:
@@ -38,7 +74,214 @@ def _safe_remove(path: str) -> None:
 
 def create_executor_app() -> Flask:
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
     workdir_base = os.getenv("WORKDIR_BASE", "/storage/subagent_work")
+    api_token = os.getenv("EXECUTOR_API_TOKEN", "").strip()
+    require_auth = os.getenv("EXECUTOR_REQUIRE_AUTH", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if require_auth and not api_token:
+        raise RuntimeError(
+            "EXECUTOR_API_TOKEN is required when EXECUTOR_REQUIRE_AUTH=1"
+        )
+    result_lock = threading.RLock()
+    result_cache: "OrderedDict[tuple[str, str, str], tuple[dict, int]]" = OrderedDict()
+    in_flight: dict[tuple[str, str, str], threading.Event] = {}
+    uid_lock = threading.RLock()
+    session_uids: dict[str, int] = {}
+    used_uids: dict[int, str] = {}
+
+    def _load_uid_secret() -> bytes:
+        secret_path = os.path.join(workdir_base, ".executor_uid_secret")
+        try:
+            secret = Path(secret_path).read_bytes()
+            if len(secret) == 32:
+                return secret
+        except OSError:
+            pass
+        secret = os.urandom(32)
+        temporary = secret_path + f".{uuid.uuid4().hex}.tmp"
+        with open(temporary, "wb") as file_handle:
+            file_handle.write(secret)
+            file_handle.flush()
+            os.fsync(file_handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, secret_path)
+        return secret
+
+    def _uid_signature(session_id: str, uid: int) -> str:
+        return hmac.new(
+            uid_secret,
+            f"{session_id}\0{uid}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _load_uid_markers() -> None:
+        if os.name == "nt" or not os.path.isdir(workdir_base):
+            return
+        try:
+            entries = list(os.scandir(workdir_base))
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            marker = os.path.join(entry.path, ".executor_uid")
+            try:
+                raw = json.loads(Path(marker).read_text(encoding="ascii"))
+                session_id = str(raw["session_id"])
+                uid = int(raw["uid"])
+                signature = str(raw["signature"])
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+            if (
+                SESSION_ID_RE.fullmatch(session_id)
+                and 100_000 <= uid <= 2_000_000_000
+                and hmac.compare_digest(signature, _uid_signature(session_id, uid))
+            ):
+                session_uids[session_id] = uid
+                used_uids[uid] = session_id
+
+    def _allocate_session_uid(session_id: str, workdir: str) -> int:
+        with uid_lock:
+            existing = session_uids.get(session_id)
+            if existing is not None:
+                return existing
+            candidate = 100_000 + (
+                int.from_bytes(hashlib.sha256(session_id.encode("utf-8")).digest()[:4], "big")
+                % 1_999_900_001
+            )
+            while (
+                candidate == EXECUTOR_PARENT_UID
+                or (candidate in used_uids and used_uids[candidate] != session_id)
+            ):
+                candidate += 1
+                if candidate > 2_000_000_000:
+                    candidate = 100_000
+            session_uids[session_id] = candidate
+            used_uids[candidate] = session_id
+            marker = os.path.join(workdir, ".executor_uid")
+            temporary = marker + f".{uuid.uuid4().hex}.tmp"
+            with open(temporary, "w", encoding="ascii") as file_handle:
+                json.dump({
+                    "session_id": session_id,
+                    "uid": candidate,
+                    "signature": _uid_signature(session_id, candidate),
+                }, file_handle)
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            os.replace(temporary, marker)
+            return candidate
+
+    def _prepare_session_isolation(session_id: str, workdir: str) -> dict:
+        """Give every session a distinct Unix UID and private 0700 tree."""
+        temp_dir = os.path.join(workdir, ".tmp")
+        os.makedirs(temp_dir, mode=0o700, exist_ok=True)
+        tool_env = {
+            key: value
+            for key, value in os.environ.items()
+            if (
+                key in TOOL_ENV_ALLOWLIST or key in TOOL_ENV_PASSTHROUGH
+            ) and key not in TOOL_ENV_BLOCKLIST
+        }
+        tool_env.update({
+            "HOME": workdir,
+            "USER": "subagent",
+            "LOGNAME": "subagent",
+            "TMPDIR": temp_dir,
+            "TMP": temp_dir,
+            "TEMP": temp_dir,
+        })
+        if os.name == "nt" or not REQUIRE_UID_ISOLATION:
+            return {"env": tool_env}
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            raise RuntimeError(
+                "Executor requires root to isolate session UIDs; set "
+                "EXECUTOR_REQUIRE_UID_ISOLATION=0 only in a trusted single-session environment"
+            )
+        uid = _allocate_session_uid(session_id, workdir)
+        os.chmod(workdir_base, 0o711)
+        for current_root, dirs, files in os.walk(workdir, followlinks=False):
+            if os.path.islink(current_root):
+                raise RuntimeError("Session workdir contains a symlinked directory")
+            os.chown(current_root, uid, uid)
+            os.chmod(current_root, 0o700)
+            for name in dirs:
+                path = os.path.join(current_root, name)
+                if os.path.islink(path):
+                    os.unlink(path)
+                    continue
+                os.chown(path, uid, uid)
+                os.chmod(path, 0o700)
+            for name in files:
+                path = os.path.join(current_root, name)
+                if os.path.islink(path):
+                    os.unlink(path)
+                    continue
+                original_mode = os.stat(path, follow_symlinks=False).st_mode
+                os.chown(path, uid, uid)
+                executable = original_mode & 0o111
+                os.chmod(path, 0o600 | executable)
+        os.chown(temp_dir, uid, uid)
+        os.chmod(temp_dir, 0o700)
+        isolated_stat = os.stat(workdir, follow_symlinks=False)
+        if isolated_stat.st_uid != uid or (isolated_stat.st_mode & 0o077):
+            raise RuntimeError(
+                "WORKDIR_BASE filesystem does not enforce required UID/mode isolation"
+            )
+        if EXECUTOR_PARENT_UID not in {0, uid}:
+            # Native mode commonly runs the main service as a non-root host
+            # user. Preserve that user's access without granting it to sibling
+            # session UIDs. Default ACLs cover files created by later commands.
+            for current_root, dirs, files in os.walk(workdir, followlinks=False):
+                subprocess.run(
+                    [
+                        "setfacl", "-m",
+                        f"u:{EXECUTOR_PARENT_UID}:rwx,d:u:{EXECUTOR_PARENT_UID}:rwx",
+                        current_root,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                for name in files:
+                    subprocess.run(
+                        [
+                            "setfacl", "-m",
+                            f"u:{EXECUTOR_PARENT_UID}:rw",
+                            os.path.join(current_root, name),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+        return {
+            "user": uid,
+            "group": uid,
+            "extra_groups": [],
+            "umask": 0o077,
+            "env": tool_env,
+        }
+
+    os.makedirs(workdir_base, exist_ok=True)
+    uid_secret = _load_uid_secret()
+    _load_uid_markers()
+
+    @app.before_request
+    def _authenticate_execution_request():
+        if request.path not in {"/bash", "/python", "/javascript"}:
+            return None
+        if not api_token:
+            return None
+        authorization = request.headers.get("Authorization", "")
+        supplied = (
+            authorization[7:].strip()
+            if authorization.lower().startswith("bearer ")
+            else request.headers.get("X-Executor-Token", "").strip()
+        )
+        if not supplied or not hmac.compare_digest(supplied, api_token):
+            return jsonify({"error": "Unauthorized executor request"}), 401
+        return None
 
     def _resolve_workdir(session_id: str) -> str:
         """Resolve the per-session workdir, applying the same sanitization
@@ -50,7 +293,11 @@ def create_executor_app() -> Flask:
         ``os.path.join`` here would discard ``workdir_base`` entirely and
         write to ``/foo`` — silently losing every tool's output.
         """
-        safe = session_id.lstrip(os.sep)
+        if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+            raise ValueError(
+                "Invalid session_id: use 1-200 letters, digits, @, dot, underscore, or hyphen"
+            )
+        safe = session_id
         real_base = os.path.realpath(workdir_base)
         resolved = os.path.realpath(os.path.join(real_base, safe))
         if resolved != real_base and not resolved.startswith(real_base + os.sep):
@@ -63,116 +310,248 @@ def create_executor_app() -> Flask:
             )
         return resolved
 
-    @app.post("/bash")
-    def bash():
-        data = request.get_json(force=True)
-        command = data.get("command", "")
+    def _request_data(required_field: str) -> tuple[dict, str, str, int | float] | tuple[None, dict, int]:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return None, {"error": "Request body must be a JSON object"}, 400
+        source = data.get(required_field)
+        if not isinstance(source, str) or not source:
+            return None, {"error": f"{required_field} must be a non-empty string"}, 400
         session_id = data.get("session_id", "default")
-        timeout = _clamp_timeout(data.get("timeout", 10))
         try:
             workdir = _resolve_workdir(session_id)
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        os.makedirs(workdir, exist_ok=True)
-        logger.info("Executing bash", extra={"session_id": session_id, "command": command[:200], "timeout": timeout})
+            return None, {"error": str(exc)}, 400
+        request_id = data.get("request_id") or uuid.uuid4().hex
+        if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
+            return None, {"error": "request_id must be 16-128 URL-safe characters"}, 400
+        timeout = _clamp_timeout(data.get("timeout", 10))
+        return data, workdir, request_id, timeout
+
+    def _execute_idempotently(
+        workdir: str,
+        operation_name: str,
+        request_id: str,
+        operation: Callable[[], tuple[dict, int]],
+    ) -> tuple[dict, int]:
+        """Execute one request id once, sharing its result with retries."""
+        key = (workdir, operation_name, request_id)
+        cache_dir = os.path.join(workdir, ".executor_results")
+        cache_name = hashlib.sha256(
+            f"{operation_name}\0{request_id}".encode("utf-8")
+        ).hexdigest() + ".json"
+        cache_path = os.path.join(cache_dir, cache_name)
+
         try:
-            result = subprocess.run(
-                command,
-                cwd=workdir,
-                capture_output=True,
-                shell=True,
-                text=True,
-                timeout=timeout,
-            )
-            return jsonify({
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode,
-            })
-        except subprocess.TimeoutExpired:
-            return jsonify({"error": f"Bash execution timed out ({timeout}s)"}), 200
+            with open(cache_path, "r", encoding="utf-8") as file_handle:
+                durable = json.load(file_handle)
+            if (
+                isinstance(durable, dict)
+                and isinstance(durable.get("payload"), dict)
+                and isinstance(durable.get("status"), int)
+            ):
+                return durable["payload"], durable["status"]
+        except (OSError, ValueError, TypeError):
+            pass
+
+        owner = False
+        with result_lock:
+            cached = result_cache.get(key)
+            if cached is not None:
+                result_cache.move_to_end(key)
+                return cached
+            event = in_flight.get(key)
+            if event is None:
+                event = threading.Event()
+                in_flight[key] = event
+                owner = True
+
+        if not owner:
+            if not event.wait(MAX_TIMEOUT + 30):
+                return {"error": "Duplicate request is still running"}, 409
+            with result_lock:
+                cached = result_cache.get(key)
+                if cached is None:
+                    return {"error": "Original request failed before producing a result"}, 503
+                result_cache.move_to_end(key)
+                return cached
+
+        try:
+            response = operation()
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                temp_path = f"{cache_path}.{uuid.uuid4().hex}.tmp"
+                with open(temp_path, "w", encoding="utf-8") as file_handle:
+                    json.dump(
+                        {"payload": response[0], "status": response[1]},
+                        file_handle,
+                        ensure_ascii=False,
+                    )
+                    file_handle.flush()
+                    os.fsync(file_handle.fileno())
+                os.replace(temp_path, cache_path)
+            except OSError as exc:
+                logger.warning(
+                    "Failed to persist executor idempotency result",
+                    extra={"request_id": request_id, "error": str(exc)},
+                )
+            with result_lock:
+                result_cache[key] = response
+                result_cache.move_to_end(key)
+                while len(result_cache) > MAX_CACHED_RESULTS:
+                    result_cache.popitem(last=False)
+            return response
+        finally:
+            with result_lock:
+                in_flight.pop(key, None)
+                event.set()
+
+    @app.post("/bash")
+    def bash():
+        parsed = _request_data("command")
+        if parsed[0] is None:
+            _, error, status = parsed
+            return jsonify(error), status
+        data, workdir, request_id, timeout = parsed
+        command = data["command"]
+        session_id = data.get("session_id", "default")
+        os.makedirs(workdir, exist_ok=True)
+        try:
+            isolation = _prepare_session_isolation(session_id, workdir)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logger.error("Session isolation failed", extra={"session_id": session_id, "error": str(exc)})
+            return jsonify({"error": str(exc), "request_id": request_id}), 503
+        logger.info("Executing bash", extra={"session_id": session_id, "command": command[:200], "timeout": timeout})
+
+        def operation() -> tuple[dict, int]:
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=workdir,
+                    capture_output=True,
+                    shell=True,
+                    text=True,
+                    timeout=timeout,
+                    **isolation,
+                )
+                return {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "returncode": result.returncode,
+                    "request_id": request_id,
+                }, 200
+            except subprocess.TimeoutExpired:
+                return {
+                    "error": f"Bash execution timed out ({timeout}s)",
+                    "request_id": request_id,
+                }, 200
+
+        payload, status = _execute_idempotently(workdir, "bash", request_id, operation)
+        return jsonify(payload), status
 
     @app.post("/javascript")
     def javascript():
-        data = request.get_json(force=True)
-        code = data.get("code", "")
+        parsed = _request_data("code")
+        if parsed[0] is None:
+            _, error, status = parsed
+            return jsonify(error), status
+        data, workdir, request_id, timeout = parsed
+        code = data["code"]
         session_id = data.get("session_id", "default")
-        timeout = _clamp_timeout(data.get("timeout", 10))
-        try:
-            workdir = _resolve_workdir(session_id)
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
         os.makedirs(workdir, exist_ok=True)
+        try:
+            isolation = _prepare_session_isolation(session_id, workdir)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logger.error("Session isolation failed", extra={"session_id": session_id, "error": str(exc)})
+            return jsonify({"error": str(exc), "request_id": request_id}), 503
         logger.info("Executing javascript", extra={"session_id": session_id, "code": code[:200], "timeout": timeout})
 
-        # Write code to a temporary file to avoid shell escaping issues with complex scripts.
-        # Use uuid4 to guarantee uniqueness even under concurrent requests in the same process.
-        js_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.js")
-        try:
-            with open(js_file, "w") as f:
-                f.write(code)
+        def operation() -> tuple[dict, int]:
+            js_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.js")
+            try:
+                with open(js_file, "w", encoding="utf-8") as file_handle:
+                    file_handle.write(code)
+                result = subprocess.run(
+                    ["node", js_file],
+                    cwd=workdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    **isolation,
+                )
+                return {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "returncode": result.returncode,
+                    "request_id": request_id,
+                }, 200
+            except subprocess.TimeoutExpired:
+                return {
+                    "error": f"Javascript execution timed out ({timeout}s)",
+                    "request_id": request_id,
+                }, 200
+            except Exception as exc:
+                logger.error("Javascript execution failed", exc_info=True)
+                return {"error": str(exc), "request_id": request_id}, 500
+            finally:
+                _safe_remove(js_file)
 
-            result = subprocess.run(
-                ["node", js_file],
-                cwd=workdir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            return jsonify({
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode,
-            })
-        except subprocess.TimeoutExpired:
-            return jsonify({"error": f"Javascript execution timed out ({timeout}s)"}), 200
-        except Exception as e:
-            logger.error("Javascript execution failed", exc_info=True)
-            return jsonify({"error": str(e)}), 500
-        finally:
-            _safe_remove(js_file)
+        payload, status = _execute_idempotently(workdir, "javascript", request_id, operation)
+        return jsonify(payload), status
 
     @app.post("/python")
     def python():
-        data = request.get_json(force=True)
-        code = data.get("code", "")
+        parsed = _request_data("code")
+        if parsed[0] is None:
+            _, error, status = parsed
+            return jsonify(error), status
+        data, workdir, request_id, timeout = parsed
+        code = data["code"]
         session_id = data.get("session_id", "default")
-        timeout = _clamp_timeout(data.get("timeout", 10))
-        try:
-            workdir = _resolve_workdir(session_id)
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
         os.makedirs(workdir, exist_ok=True)
+        try:
+            isolation = _prepare_session_isolation(session_id, workdir)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logger.error("Session isolation failed", extra={"session_id": session_id, "error": str(exc)})
+            return jsonify({"error": str(exc), "request_id": request_id}), 503
         logger.info("Executing python", extra={"session_id": session_id, "code": code[:200], "timeout": timeout})
 
         # Execute Python code in a subprocess so that memory-hungry code
         # (e.g. PyTorch model loading) cannot OOM-kill the Flask server.
         # This mirrors how /javascript and /bash already spawn child processes.
         # Use uuid4 to guarantee uniqueness even under concurrent requests.
-        py_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.py")
-        try:
-            with open(py_file, "w") as f:
-                f.write(code)
+        def operation() -> tuple[dict, int]:
+            py_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.py")
+            try:
+                with open(py_file, "w", encoding="utf-8") as file_handle:
+                    file_handle.write(code)
+                result = subprocess.run(
+                    [sys.executable, py_file],
+                    cwd=workdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    **isolation,
+                )
+                return {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "returncode": result.returncode,
+                    "request_id": request_id,
+                }, 200
+            except subprocess.TimeoutExpired:
+                return {
+                    "error": f"Python execution timed out ({timeout}s)",
+                    "request_id": request_id,
+                }, 200
+            except Exception as exc:
+                logger.error("Python execution failed", exc_info=True)
+                return {"error": str(exc), "request_id": request_id}, 500
+            finally:
+                _safe_remove(py_file)
 
-            result = subprocess.run(
-                ["python3", py_file],
-                cwd=workdir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            return jsonify({
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode,
-            })
-        except subprocess.TimeoutExpired:
-            return jsonify({"error": f"Python execution timed out ({timeout}s)"}), 200
-        except Exception as e:
-            logger.error("Python execution failed", exc_info=True)
-            return jsonify({"error": str(e)}), 500
-        finally:
-            _safe_remove(py_file)
+        payload, status = _execute_idempotently(workdir, "python", request_id, operation)
+        return jsonify(payload), status
 
     @app.get("/health")
     def health():

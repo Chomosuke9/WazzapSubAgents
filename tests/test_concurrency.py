@@ -16,10 +16,6 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import List, Tuple
-from unittest.mock import patch
-
-import pytest
 
 from src.concurrency import SubAgentQueue
 from src.session_manager import SessionManager
@@ -177,9 +173,13 @@ def test_fire_queue_event_uses_progress_webhook():
 
   sm.fire_queue_event("sess-1", {"type": "queued", "position": 1, "queue_size": 1})
 
-  assert captured == [
-    ("http://bridge/webhook", {"type": "queued", "position": 1, "queue_size": 1}),
-  ]
+  assert len(captured) == 1
+  url, payload = captured[0]
+  assert url == "http://bridge/webhook"
+  assert payload["type"] == "queued"
+  assert payload["position"] == payload["queue_size"] == 1
+  assert payload["sequence"] == 1
+  assert isinstance(payload["emitted_at"], float)
 
 
 def test_fire_queue_event_ignores_missing_webhook():

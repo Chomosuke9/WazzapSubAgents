@@ -11,6 +11,7 @@ configured.
 
 from __future__ import annotations
 
+import base64 as _base64
 import os
 import tempfile
 
@@ -19,6 +20,7 @@ import pytest
 from src.input_staging import (
     INPUT_SUBDIR,
     is_input_path,
+    stage_inputs_from_content,
     stage_inputs_into_workdir,
 )
 
@@ -127,11 +129,6 @@ def test_is_input_path_handles_empty_args():
 # ---------------------------------------------------------------------------
 # stage_inputs_from_content
 # ---------------------------------------------------------------------------
-
-import base64 as _base64
-
-from src.input_staging import stage_inputs_from_content
-
 
 def test_stage_inputs_from_content_decodes_base64(workdir):
     content = b"hello-content"

@@ -1,203 +1,524 @@
-"""Stage caller-supplied input files so the executor container can read them.
+"""Secure, fail-closed staging for files supplied by the parent agent.
 
-Background
-----------
-The executor sidecar container only bind-mounts ``WORKDIR_BASE`` (and
-optionally ``SUBAGENT_STORAGE_DIR`` → ``/storage``) from the host. When
-WazzapAgents sends ``input_files`` paths in ``/execute`` that live outside
-those mounts — for example, the bridge default ``<repo>/data/subagent_in/...``
-— the agent's ``bash``/``python`` tools run inside the container and see
-nothing at that path. The user-visible symptom is that the sub-agent fails
-with "file not found" on a file the bridge swears it just staged.
-
-The fix: before running the agent, copy each input file into
-``<workdir>/input/<basename>``. ``<workdir>`` is rooted in
-``WORKDIR_BASE``, which IS bind-mounted at the same host/container path,
-so the copies are reachable from inside the container regardless of how
-the operator deployed the bridge. Cleanup is automatic — ``SessionManager``
-already ``rmtree``s the workdir when the session ends.
-
-The name ``input`` is chosen so it is:
-
-* Distinct from anything the agent is likely to create itself
-  (``output``/``out``/etc).
+Every accepted file is copied atomically into ``<session workdir>/input`` and
+described by a size/SHA-256 manifest.  Callers can therefore distinguish an
+accepted task from one whose files were missing, malformed, or inaccessible.
 """
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
 import os
-import shutil
-from typing import Iterable, List
+import stat
+import tempfile
+from dataclasses import dataclass, field
+from typing import Any, Iterable, List
 
 from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 INPUT_SUBDIR = "input"
+DEFAULT_MAX_FILE_BYTES = int(
+    os.getenv("SUBAGENT_MAX_INPUT_FILE_BYTES", str(200 * 1024 * 1024))
+)
+DEFAULT_MAX_TOTAL_BYTES = int(
+    os.getenv("SUBAGENT_MAX_INPUT_TOTAL_BYTES", str(256 * 1024 * 1024))
+)
+DEFAULT_MAX_FILES = int(os.getenv("SUBAGENT_MAX_INPUT_FILES", "64"))
+_CHUNK_SIZE = 1024 * 1024
 
 
-def stage_inputs_into_workdir(
-    workdir: str,
-    raw_paths: Iterable[str],
-) -> List[str]:
-    """Copy ``raw_paths`` into ``<workdir>/input/`` and return the new paths.
+@dataclass(frozen=True)
+class StagedFile:
+    """A file that was durably staged and verified."""
 
-    Files that don't exist or aren't regular files are silently skipped
-    with a warning (the agent will see a shorter list and decide what to
-    do — same semantics as before). Basename collisions are resolved by
-    appending an integer suffix (``foo.zip`` → ``foo_1.zip``).
+    name: str
+    path: str
+    size: int
+    sha256: str
+    source: str
+    stored_name: str
 
-    Returns absolute paths inside the workdir, in input order, omitting
-    skipped entries. The empty list is returned if there are no inputs to
-    stage or if the staging directory cannot be created.
-    """
-    paths = [str(p) for p in raw_paths if isinstance(p, (str, os.PathLike))]
-    if not paths:
-        return []
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "path": self.path,
+            "size": self.size,
+            "sha256": self.sha256,
+            "source": self.source,
+            "stored_name": self.stored_name,
+        }
 
-    target_root = os.path.join(workdir, INPUT_SUBDIR)
-    try:
-        os.makedirs(target_root, exist_ok=True)
-    except OSError as err:
-        logger.exception(
-            "stage_inputs_into_workdir: failed to create %s: %s",
-            target_root, err,
+
+@dataclass(frozen=True)
+class StagingError:
+    """A stable, machine-readable staging error."""
+
+    name: str
+    code: str
+    error: str
+    path: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "name": self.name,
+            "code": self.code,
+            "error": self.error,
+        }
+        if self.path is not None:
+            value["path"] = self.path
+        return value
+
+
+@dataclass
+class StagingResult:
+    requested_file_count: int = 0
+    staged_files: list[StagedFile] = field(default_factory=list)
+    file_errors: list[StagingError] = field(default_factory=list)
+
+    @property
+    def staged_file_count(self) -> int:
+        return len(self.staged_files)
+
+    @property
+    def paths(self) -> list[str]:
+        return [entry.path for entry in self.staged_files]
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.requested_file_count == self.staged_file_count
+            and not self.file_errors
         )
-        return []
 
-    used_names: set[str] = set()
-    staged: list[str] = []
-    for src in paths:
-        name = os.path.basename(src) or "unnamed"
-        if not src or not os.path.exists(src):
-            logger.warning(
-                "stage_inputs_into_workdir: source missing, skipping: %s",
-                src,
-            )
-            continue
-        if not os.path.isfile(src):
-            logger.warning(
-                "stage_inputs_into_workdir: not a regular file, skipping: %s",
-                src,
-            )
-            continue
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "requested_file_count": self.requested_file_count,
+            "staged_file_count": self.staged_file_count,
+            "staged_files": [entry.as_dict() for entry in self.staged_files],
+            "file_errors": [entry.as_dict() for entry in self.file_errors],
+        }
 
-        # Avoid clobbering when two source files share a basename.
-        final_name = name
-        counter = 1
-        while final_name in used_names or os.path.exists(
-            os.path.join(target_root, final_name)
-        ):
-            stem, ext = os.path.splitext(name)
-            final_name = f"{stem}_{counter}{ext}"
-            counter += 1
-        used_names.add(final_name)
 
-        dest = os.path.join(target_root, final_name)
+def _safe_name(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > 255:
+        raise ValueError("filename must be a non-empty string of at most 255 characters")
+    if value in {".", ".."} or os.path.basename(value) != value:
+        raise ValueError("filename must be a basename without path separators")
+    if "/" in value or "\\" in value or "\x00" in value:
+        raise ValueError("filename contains a forbidden character")
+    return value
+
+
+def _inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath((path, root)) == root
+    except ValueError:
+        return False
+
+
+def _prepare_target_root(workdir: str) -> str:
+    real_workdir = os.path.realpath(workdir)
+    if os.path.islink(workdir):
+        raise ValueError("session workdir must not be a symlink")
+    os.makedirs(real_workdir, exist_ok=True)
+    target_root = os.path.join(real_workdir, INPUT_SUBDIR)
+    if os.path.lexists(target_root) and os.path.islink(target_root):
+        raise ValueError("session input directory must not be a symlink")
+    os.makedirs(target_root, exist_ok=True)
+    real_target = os.path.realpath(target_root)
+    if not _inside(real_target, real_workdir) or real_target == real_workdir:
+        raise ValueError("session input directory resolves outside the workdir")
+    return real_target
+
+
+def _unique_destination(target_root: str, requested_name: str) -> tuple[str, str]:
+    name = requested_name
+    counter = 1
+    while os.path.lexists(os.path.join(target_root, name)):
+        stem, ext = os.path.splitext(requested_name)
+        name = f"{stem}_{counter}{ext}"
+        counter += 1
+    destination = os.path.join(target_root, name)
+    if not _inside(os.path.realpath(destination), target_root):
+        raise ValueError("destination resolves outside the session input directory")
+    return name, destination
+
+
+def _atomic_write(
+    target_root: str,
+    requested_name: str,
+    chunks: Iterable[bytes],
+    *,
+    max_bytes: int,
+) -> tuple[str, int, str, str]:
+    stored_name, destination = _unique_destination(target_root, requested_name)
+    fd, temporary = tempfile.mkstemp(prefix=".staging-", dir=target_root)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            for chunk in chunks:
+                if not isinstance(chunk, bytes):
+                    raise ValueError("staging source yielded non-bytes data")
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError(f"file exceeds {max_bytes} byte limit")
+                handle.write(chunk)
+                digest.update(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        return os.path.abspath(destination), size, digest.hexdigest(), stored_name
+    except Exception:
         try:
-            shutil.copyfile(src, dest)
-        except OSError as err:
-            logger.warning(
-                "stage_inputs_into_workdir: copy failed for %s -> %s: %s",
-                src, dest, err,
-            )
-            continue
-        staged.append(os.path.abspath(dest))
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
+
+def _decode_chunks(encoded: str) -> Iterable[bytes]:
+    # Strict validation prevents corrupt/truncated input from being accepted.
+    try:
+        yield base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"invalid base64 content: {exc}") from exc
+
+
+def _source_chunks(path: str) -> Iterable[bytes]:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("source is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            while True:
+                chunk = handle.read(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        os.close(fd)
+
+
+def _validate_source(path: str, source_root: str, forbidden_root: str | None) -> str:
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise ValueError("source path must be a non-empty string")
+    absolute = os.path.abspath(path)
+    if os.path.islink(absolute):
+        raise ValueError("symbolic-link sources are not allowed")
+    real_source = os.path.realpath(absolute)
+    real_root = os.path.realpath(source_root)
+    if not _inside(real_source, real_root) or real_source == real_root:
+        raise ValueError("source resolves outside SUBAGENT_INPUT_SOURCE_ROOT")
+    if forbidden_root:
+        real_forbidden = os.path.realpath(forbidden_root)
+        if _inside(real_source, real_forbidden):
+            raise ValueError("cross-session workdir sources are not allowed")
+    if not os.path.exists(real_source):
+        raise FileNotFoundError("source file does not exist")
+    return real_source
+
+
+def _verify_expected(item: dict[str, Any], size: int, sha256: str) -> None:
+    expected_size = item.get("size")
+    if expected_size is not None:
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+            raise ValueError("declared size must be a non-negative integer")
+        if expected_size != size:
+            raise ValueError(f"size mismatch: expected {expected_size}, staged {size}")
+    expected_hash = item.get("sha256")
+    if expected_hash is not None:
+        if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+            raise ValueError("declared sha256 must contain 64 hexadecimal characters")
+        try:
+            int(expected_hash, 16)
+        except ValueError as exc:
+            raise ValueError("declared sha256 must be hexadecimal") from exc
+        if expected_hash.lower() != sha256:
+            raise ValueError("sha256 mismatch")
+
+
+def stage_request_inputs(
+    workdir: str,
+    raw_paths: Iterable[Any] | None,
+    files_content: list[dict[str, Any]] | None,
+    *,
+    source_root: str,
+    forbidden_source_root: str | None = None,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_files: int = DEFAULT_MAX_FILES,
+) -> StagingResult:
+    """Stage a logical file set and return a complete manifest.
+
+    A basename present in both ``raw_paths`` and ``files_content`` represents
+    one logical file. Inline content is authoritative and the path is a
+    fallback only when decoding or integrity verification fails.
+    """
+    result = StagingResult()
+    try:
+        target_root = _prepare_target_root(workdir)
+    except Exception as exc:
+        result.file_errors.append(StagingError("*", "target_unavailable", str(exc)))
+        return result
+
+    if raw_paths is None:
+        raw_items: list[Any] = []
+    elif isinstance(raw_paths, (list, tuple)):
+        raw_items = list(raw_paths)
+    else:
+        result.file_errors.append(
+            StagingError("*", "invalid_schema", "input_files must be an array")
+        )
+        return result
+    if files_content is None:
+        content_items: list[Any] = []
+    elif isinstance(files_content, list):
+        content_items = list(files_content)
+    else:
+        result.file_errors.append(
+            StagingError("*", "invalid_schema", "input_files_content must be an array")
+        )
+        return result
+
+    by_path_name: dict[str, dict[str, Any]] = {}
+    inline_by_name: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    for raw in raw_items:
+        item = {"path": raw} if isinstance(raw, str) else raw
+        path = item.get("path") if isinstance(item, dict) else None
+        candidate = item.get("name") if isinstance(item, dict) else None
+        candidate = candidate or (os.path.basename(path) if isinstance(path, str) else "")
+        try:
+            name = _safe_name(candidate)
+        except ValueError as exc:
+            result.file_errors.append(StagingError(str(candidate or "*"), "invalid_name", str(exc), str(path) if path else None))
+            continue
+        if name in by_path_name:
+            result.file_errors.append(StagingError(name, "duplicate_name", "duplicate input_files basename", str(path)))
+            continue
+        by_path_name[name] = dict(item)
+        if name not in order:
+            order.append(name)
+
+    for raw in content_items:
+        if not isinstance(raw, dict):
+            result.file_errors.append(StagingError("*", "invalid_schema", "inline file entry must be an object"))
+            continue
+        try:
+            name = _safe_name(raw.get("name"))
+        except ValueError as exc:
+            result.file_errors.append(StagingError(str(raw.get("name") or "*"), "invalid_name", str(exc)))
+            continue
+        if name in inline_by_name:
+            result.file_errors.append(StagingError(name, "duplicate_name", "duplicate input_files_content name"))
+            continue
+        inline_by_name[name] = raw
+        if name not in order:
+            order.append(name)
+
+    result.requested_file_count = len(order)
+    if len(order) > max_files:
+        result.file_errors.append(
+            StagingError("*", "too_many_files", f"requested {len(order)} files; limit is {max_files}")
+        )
+        return result
+
+    total_size = 0
+    preexisting_errors = {entry.name for entry in result.file_errors}
+    for name in order:
+        if name in preexisting_errors:
+            continue
+        inline = inline_by_name.get(name)
+        path_item = by_path_name.get(name)
+        errors: list[tuple[str, Exception, str | None]] = []
+        staged: StagedFile | None = None
+        staged_path: str | None = None
+
+        if inline is not None:
+            encoded = inline.get("content_base64")
+            if not isinstance(encoded, str):
+                errors.append(("invalid_content", ValueError("content_base64 must be a string"), None))
+            else:
+                try:
+                    staged_path, size, digest, stored_name = _atomic_write(
+                        target_root,
+                        name,
+                        _decode_chunks(encoded),
+                        max_bytes=min(max_file_bytes, max_total_bytes - total_size),
+                    )
+                    _verify_expected(inline, size, digest)
+                    staged = StagedFile(name, staged_path, size, digest, "inline", stored_name)
+                except Exception as exc:
+                    # Integrity failure must remove the just-staged file.
+                    if staged_path and os.path.isfile(staged_path):
+                        try:
+                            os.unlink(staged_path)
+                        except OSError:
+                            pass
+                    errors.append(("invalid_content", exc, None))
+
+        if staged is None and path_item is not None:
+            raw_path = path_item.get("path")
+            try:
+                source = _validate_source(raw_path, source_root, forbidden_source_root)
+                path, size, digest, stored_name = _atomic_write(
+                    target_root,
+                    name,
+                    _source_chunks(source),
+                    max_bytes=min(max_file_bytes, max_total_bytes - total_size),
+                )
+                _verify_expected(path_item, size, digest)
+                staged = StagedFile(
+                    name,
+                    path,
+                    size,
+                    digest,
+                    str(path_item.get("_source") or (
+                        "path_fallback" if inline is not None else "path"
+                    )),
+                    stored_name,
+                )
+            except Exception as exc:
+                errors.append(("source_unavailable", exc, str(raw_path) if raw_path is not None else None))
+
+        if staged is not None:
+            total_size += staged.size
+            result.staged_files.append(staged)
+            if total_size > max_total_bytes:
+                try:
+                    os.unlink(staged.path)
+                except OSError:
+                    pass
+                result.staged_files.pop()
+                result.file_errors.append(
+                    StagingError(name, "total_size_exceeded", f"aggregate input exceeds {max_total_bytes} bytes")
+                )
+            continue
+
+        if errors:
+            code, exc, failed_path = errors[-1]
+            details = "; ".join(str(error) for _, error, _ in errors)
+            result.file_errors.append(StagingError(name, code, details, failed_path))
+        else:
+            result.file_errors.append(StagingError(name, "missing_content", "no usable path or inline content supplied"))
+
+    return result
+
+
+def rehydrate_staged_inputs(
+    workdir: str,
+    previous_workdir: str,
+    previous_manifest: dict[str, Any],
+    *,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+) -> StagingResult:
+    """Copy verified input files from an explicitly selected prior session.
+
+    This is separate from caller path staging: arbitrary requests may never
+    read a sibling session, while an authenticated ``previous_session_id``
+    continuation can rehydrate only files recorded in that session's manifest.
+    """
+    result = StagingResult()
+    entries = previous_manifest.get("staged_files") if isinstance(previous_manifest, dict) else None
+    if not entries:
+        return result
+    if not isinstance(entries, list):
+        result.file_errors.append(StagingError("*", "invalid_previous_manifest", "prior staged_files is not an array"))
+        return result
+    try:
+        target_root = _prepare_target_root(workdir)
+    except Exception as exc:
+        result.file_errors.append(StagingError("*", "target_unavailable", str(exc)))
+        return result
+
+    previous_input = os.path.realpath(os.path.join(previous_workdir, INPUT_SUBDIR))
+    result.requested_file_count = len(entries)
+    total = 0
+    for raw in entries:
+        if not isinstance(raw, dict):
+            result.file_errors.append(StagingError("*", "invalid_previous_manifest", "prior file entry is not an object"))
+            continue
+        try:
+            name = _safe_name(raw.get("name"))
+            source = os.path.realpath(str(raw.get("path") or ""))
+            if not _inside(source, previous_input) or source == previous_input:
+                raise ValueError("prior file path resolves outside its session input directory")
+            if os.path.islink(source) or not os.path.isfile(source):
+                raise ValueError("prior staged file is unavailable or a symlink")
+            destination, size, digest, stored_name = _atomic_write(
+                target_root,
+                name,
+                _source_chunks(source),
+                max_bytes=min(max_file_bytes, max_total_bytes - total),
+            )
+            _verify_expected(raw, size, digest)
+            total += size
+            result.staged_files.append(
+                StagedFile(name, destination, size, digest, "previous_session", stored_name)
+            )
+        except Exception as exc:
+            result.file_errors.append(
+                StagingError(str(raw.get("name") or "*"), "previous_file_unavailable", str(exc), str(raw.get("path") or ""))
+            )
+    return result
+
+
+def _legacy_source_root(workdir: str) -> str:
+    configured = os.getenv("SUBAGENT_INPUT_SOURCE_ROOT") or os.getenv("SUBAGENT_STORAGE_DIR")
+    if configured:
+        return configured
+    workdir_base = os.path.realpath(os.getenv("WORKDIR_BASE", os.path.dirname(workdir)))
+    return os.path.dirname(workdir_base)
+
+
+def stage_inputs_into_workdir(workdir: str, raw_paths: Iterable[str]) -> List[str]:
+    """Backward-compatible wrapper returning only successfully staged paths."""
+    items = list(raw_paths)
+    if not items:
+        return []
+    # Legacy helper callers expect duplicate basenames to be suffixed rather
+    # than rejected. The HTTP protocol uses ``stage_request_inputs`` directly
+    # and remains strict/fail-closed.
+    staged: list[str] = []
+    for item in items:
+        staged.extend(stage_request_inputs(
+            workdir,
+            [item],
+            [],
+            source_root=_legacy_source_root(workdir),
+            forbidden_source_root=os.getenv("WORKDIR_BASE"),
+        ).paths)
     return staged
 
 
-def stage_inputs_from_content(
-    workdir: str,
-    files_content: list[dict],
-) -> list[str]:
-    """Decode base64-encoded file content and write into <workdir>/input/.
-
-    Each entry in files_content must have:
-      - "name": str  (filename to use)
-      - "content_base64": str  (base64-encoded file bytes)
-
-    Returns absolute paths of written files, in input order, omitting
-    entries with missing/invalid fields or decode errors.
-    Used for cross-machine deployment where the caller can't share a
-    filesystem with the sub-agent.
-    """
+def stage_inputs_from_content(workdir: str, files_content: list[dict]) -> list[str]:
+    """Backward-compatible wrapper returning only successfully staged paths."""
     if not files_content:
         return []
-
-    target_root = os.path.join(workdir, INPUT_SUBDIR)
-    try:
-        os.makedirs(target_root, exist_ok=True)
-    except OSError as err:
-        logger.exception(
-            "stage_inputs_from_content: failed to create %s: %s",
-            target_root, err,
-        )
-        return []
-
-    used_names: set[str] = set()
     staged: list[str] = []
     for item in files_content:
-        name = item.get("name") if isinstance(item, dict) else None
-        content_b64 = item.get("content_base64") if isinstance(item, dict) else None
-        if not name or not content_b64:
-            logger.warning(
-                "stage_inputs_from_content: skipping entry with missing name or content_base64",
-            )
-            continue
-
-        name = os.path.basename(str(name)) or "unnamed"
-
-        # Quick pre-check: estimated decoded size = len(b64) * 3 // 4.
-        # Avoids materializing a large allocation when the payload is
-        # clearly oversized before calling b64decode.
-        estimated_size = len(content_b64) * 3 // 4
-        if estimated_size > 200 * 1024 * 1024:  # 200 MB hard cap
-            logger.warning(
-                "stage_inputs_from_content: skipping oversized entry %s (~%d bytes)",
-                name, estimated_size,
-            )
-            continue
-
-        try:
-            data = base64.b64decode(content_b64)
-        except Exception as err:
-            logger.warning(
-                "stage_inputs_from_content: base64 decode failed for %s: %s",
-                name, err,
-            )
-            continue
-
-        # Avoid clobbering when two entries share a basename.
-        final_name = name
-        counter = 1
-        while final_name in used_names or os.path.exists(
-            os.path.join(target_root, final_name)
-        ):
-            stem, ext = os.path.splitext(name)
-            final_name = f"{stem}_{counter}{ext}"
-            counter += 1
-        used_names.add(final_name)
-
-        dest = os.path.join(target_root, final_name)
-        try:
-            with open(dest, "wb") as fh:
-                fh.write(data)
-        except OSError as err:
-            logger.warning(
-                "stage_inputs_from_content: write failed for %s: %s",
-                dest, err,
-            )
-            continue
-        staged.append(os.path.abspath(dest))
-
+        staged.extend(stage_request_inputs(
+            workdir,
+            [],
+            [item],
+            source_root=_legacy_source_root(workdir),
+            forbidden_source_root=os.getenv("WORKDIR_BASE"),
+        ).paths)
     return staged
 
 
 def is_input_path(workdir: str, path: str) -> bool:
-    """Return True if ``path`` lives under ``<workdir>/input/``.
-
-    Note: Currently disabled to allow input files to be returned as outputs.
-    """
-    return False
+    """Return whether ``path`` is a real file below this session's input dir."""
+    root = os.path.realpath(os.path.join(workdir, INPUT_SUBDIR))
+    candidate = os.path.realpath(path)
+    return _inside(candidate, root)

@@ -1,6 +1,8 @@
+import os
 import threading
 import time
 from typing import Any, Dict, Optional, TYPE_CHECKING
+import uuid
 
 import requests
 
@@ -19,11 +21,23 @@ class ContainerClient:
         timeout: int = 300,
         max_retries: int = 3,
         docker_mgr: Optional["DockerManager"] = None,
+        http_timeout_grace: Optional[float] = None,
+        api_token: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
         self.docker_mgr = docker_mgr
+        self.http_timeout_grace = (
+            float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "5"))
+            if http_timeout_grace is None else float(http_timeout_grace)
+        )
+        if self.http_timeout_grace < 1:
+            raise ValueError("http_timeout_grace must be at least 1 second")
+        self.api_token = (
+            os.getenv("EXECUTOR_API_TOKEN", "").strip()
+            if api_token is None else api_token.strip()
+        )
         self._restart_lock = threading.Lock()
 
     def _restart_container(self) -> None:
@@ -57,10 +71,27 @@ class ContainerClient:
     def _post(self, endpoint: str, payload: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{endpoint}"
         restarted = False
-        request_timeout = timeout if timeout is not None else self.timeout
+        # A stable id makes a retry safe even if the executor finished the
+        # command but its HTTP response was lost. The sidecar caches the first
+        # result for this id and never runs the command twice.
+        payload = {**payload}
+        payload.setdefault("request_id", uuid.uuid4().hex)
+        request_timeout = (
+            float(timeout) + self.http_timeout_grace
+            if timeout is not None else self.timeout
+        )
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = requests.post(url, json=payload, timeout=request_timeout)
+                headers = (
+                    {"Authorization": f"Bearer {self.api_token}"}
+                    if self.api_token else None
+                )
+                resp = requests.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=request_timeout,
+                )
                 resp.raise_for_status()
                 return resp.json()
             except requests.exceptions.HTTPError as e:

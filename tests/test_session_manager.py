@@ -1,6 +1,8 @@
+import base64 as _base64
 import os
 import time
-from threading import Thread
+
+import pytest
 
 from src.session_manager import SessionManager
 
@@ -57,7 +59,6 @@ def test_rejects_traversal_session_id(tmp_path, monkeypatch):
     # cleanup_session would shutil.rmtree an arbitrary directory.
     monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
     sm = SessionManager()
-    import pytest
     with pytest.raises(ValueError):
         sm.get_or_create("../../etc")
     with pytest.raises(ValueError):
@@ -68,21 +69,19 @@ def test_rejects_traversal_session_id(tmp_path, monkeypatch):
         sm.get_or_create("")
 
 
-def test_absolute_session_id_is_contained(tmp_path, monkeypatch):
-    # An absolute-looking session_id like ``/etc`` must NOT escape
-    # WORKDIR_BASE (the leading separator is stripped before joining).
+def test_absolute_session_id_is_rejected(tmp_path, monkeypatch):
+    # Opaque identifiers are canonical: aliases must be rejected rather than
+    # normalized to a second spelling of the same workdir.
     monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
     sm = SessionManager()
-    s = sm.get_or_create("/etc")
-    assert s.workdir.startswith(str(tmp_path) + os.sep)
-    sm.cleanup_session("/etc")
+    with pytest.raises(ValueError):
+        sm.get_or_create("/etc")
 
 
 # ---------------------------------------------------------------------------
 # Tests: output_files_content in webhook payload
 # ---------------------------------------------------------------------------
 
-import base64 as _base64
 
 
 def test_store_result_includes_output_files_content(tmp_path, monkeypatch):

@@ -1,4 +1,6 @@
 import os
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,7 +16,8 @@ def client(tmp_path, monkeypatch):
 
 def test_bash_valid_session_id_runs_inside_workdir_base(client):
     client_, base = client
-    r = client_.post("/bash", json={"command": "pwd", "session_id": "abc"})
+    command = "cd" if os.name == "nt" else "pwd"
+    r = client_.post("/bash", json={"command": command, "session_id": "abc"})
     assert r.status_code == 200, r.data
     out = r.get_json()
     assert out["stdout"].strip().startswith(base + os.sep)
@@ -25,18 +28,13 @@ def test_bash_rejects_dot_dot_traversal(client):
     client_, _ = client
     r = client_.post("/bash", json={"command": "pwd", "session_id": "../../etc"})
     assert r.status_code == 400
-    assert "outside workdir_base" in r.get_json()["error"]
+    assert "Invalid session_id" in r.get_json()["error"]
 
 
-def test_bash_absolute_session_id_is_contained(client):
-    # ``/foo`` must be sanitized the same way SessionManager sanitizes it,
-    # otherwise the executor would write to the host root while the main
-    # service collects from <workdir_base>/foo.
-    client_, base = client
+def test_bash_absolute_session_id_is_rejected(client):
+    client_, _ = client
     r = client_.post("/bash", json={"command": "pwd", "session_id": "/foo"})
-    assert r.status_code == 200, r.data
-    out = r.get_json()
-    assert out["stdout"].strip().startswith(base + os.sep)
+    assert r.status_code == 400
 
 
 def test_bash_rejects_empty_session_id(client):
@@ -72,9 +70,10 @@ def test_python_valid_session_id(client):
 
 def test_bash_respects_custom_timeout(client):
     client_, _ = client
+    command = f'"{sys.executable}" -c "import time; time.sleep(5)"'
     r = client_.post(
         "/bash",
-        json={"command": "sleep 5", "session_id": "timeout-test", "timeout": 1},
+        json={"command": command, "session_id": "timeout-test", "timeout": 1},
     )
     assert r.status_code == 200, r.data
     out = r.get_json()
@@ -104,6 +103,87 @@ def test_javascript_respects_custom_timeout(client):
     assert r.status_code == 200, r.data
     out = r.get_json()
     assert "timed out (1s)" in out["error"]
+
+
+def test_duplicate_request_id_executes_command_only_once(client):
+    client_, _ = client
+    completed = MagicMock(stdout="once\n", stderr="", returncode=0)
+    payload = {
+        "command": "echo once",
+        "session_id": "dedupe-test",
+        "request_id": "request-idempotency-0001",
+    }
+    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+        first = client_.post("/bash", json=payload)
+        second = client_.post("/bash", json=payload)
+
+    assert first.status_code == second.status_code == 200
+    assert first.get_json() == second.get_json()
+    assert run.call_count == 1
+
+
+def test_duplicate_request_survives_executor_app_restart(client):
+    client_, _ = client
+    completed = MagicMock(stdout="durable\n", stderr="", returncode=0)
+    payload = {
+        "command": "echo durable",
+        "session_id": "durable-dedupe",
+        "request_id": "request-idempotency-0002",
+    }
+    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+        first = client_.post("/bash", json=payload)
+        restarted_client = create_executor_app().test_client()
+        second = restarted_client.post("/bash", json=payload)
+
+    assert first.get_json() == second.get_json()
+    assert run.call_count == 1
+
+
+def test_rejects_non_object_json(client):
+    client_, _ = client
+    response = client_.post("/bash", json=["echo", "unsafe"])
+    assert response.status_code == 400
+
+
+def test_executor_auth_rejects_missing_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    monkeypatch.setenv("EXECUTOR_API_TOKEN", "executor-secret")
+    monkeypatch.setenv("EXECUTOR_REQUIRE_AUTH", "1")
+    authenticated_app = create_executor_app()
+    authenticated_client = authenticated_app.test_client()
+
+    missing = authenticated_client.post(
+        "/bash", json={"command": "echo no", "session_id": "auth-test"}
+    )
+    assert missing.status_code == 401
+
+    completed = MagicMock(stdout="ok\n", stderr="", returncode=0)
+    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+        accepted = authenticated_client.post(
+            "/bash",
+            json={"command": "echo yes", "session_id": "auth-test"},
+            headers={"Authorization": "Bearer executor-secret"},
+        )
+    assert accepted.status_code == 200
+    assert "EXECUTOR_API_TOKEN" not in run.call_args.kwargs["env"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="Unix UID isolation requires a root test runner",
+)
+def test_sibling_sessions_run_as_distinct_uids(client):
+    client_, _ = client
+    completed = MagicMock(stdout="ok\n", stderr="", returncode=0)
+    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+        first = client_.post("/bash", json={"command": "true", "session_id": "uid-a"})
+        second = client_.post("/bash", json={"command": "true", "session_id": "uid-b"})
+
+    assert first.status_code == second.status_code == 200
+    first_uid = run.call_args_list[0].kwargs["user"]
+    second_uid = run.call_args_list[1].kwargs["user"]
+    assert first_uid != second_uid
+    assert run.call_args_list[0].kwargs["umask"] == 0o077
 
 
 # --- _clamp_timeout tests ---
@@ -151,7 +231,6 @@ def test_safe_remove_ignores_os_error(tmp_path, monkeypatch):
     f = tmp_path / "stubborn.txt"
     f.write_text("won't go away")
 
-    original_remove = os.remove
     call_count = 0
 
     def failing_remove(path):

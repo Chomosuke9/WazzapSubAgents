@@ -1,5 +1,4 @@
 import os
-import time
 
 import pytest
 import requests
@@ -37,4 +36,4 @@ class TestIntegration:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert "42" in data["output"]
+        assert "42" in data["stdout"]

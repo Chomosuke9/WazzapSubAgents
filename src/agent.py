@@ -447,7 +447,18 @@ class ExecutorAgent:
         seen: set[str] = set()
         for raw_path in declared:
             try:
-                resolved = os.path.realpath(raw_path)
+                # Skills commonly declare ``./report.pdf``. Tool execution
+                # happens in the session workdir, so resolve relative output
+                # paths against that same directory rather than the main
+                # service process cwd.
+                candidate = (
+                    raw_path if os.path.isabs(raw_path)
+                    else os.path.join(workdir_real, raw_path)
+                )
+                if os.path.islink(candidate):
+                    skipped.append({"path": raw_path, "reason": "symlink_not_allowed"})
+                    continue
+                resolved = os.path.realpath(candidate)
             except OSError:
                 skipped.append({"path": raw_path, "reason": "realpath_failed"})
                 continue
@@ -859,6 +870,25 @@ class ExecutorAgent:
                 f"{files_block}"
             )
         messages.append(HumanMessage(content=instruction))
+        seen_steering: set[str] = set()
+
+        def inject_pending_steering() -> int:
+            """Consume each queued steering instruction exactly once."""
+            pending = self.session_manager.consume_steering_messages(session_id)
+            fresh = [message for message in pending if message not in seen_steering]
+            for steering_message in fresh:
+                seen_steering.add(steering_message)
+                self.logger.info(
+                    "Injecting steering message",
+                    extra={
+                        "session_id": session_id,
+                        "message_preview": steering_message[:200],
+                    },
+                )
+                messages.append(
+                    HumanMessage(content=f"[STEERING INSTRUCTION]: {steering_message}")
+                )
+            return len(fresh)
 
         max_iterations = 50
         final_result: Optional[Dict[str, Any]] = None
@@ -866,6 +896,10 @@ class ExecutorAgent:
         repeat_count = 0
 
         for i in range(max_iterations):
+            # A /steer request may arrive while this run is still queued or
+            # before its first LLM invocation. Consume it before every invoke,
+            # including the very first one.
+            inject_pending_steering()
             try:
                 response, tool_calls = self._invoke_until_tool_call(
                     messages,
@@ -921,6 +955,33 @@ class ExecutorAgent:
                 tc_id = tc["id"]
 
                 if tool_name == "end_task":
+                    # Close the race where steering is accepted while the LLM
+                    # call that produced end_task is in flight. If anything is
+                    # queued, make the model process it before completion.
+                    if inject_pending_steering():
+                        messages.append(ToolMessage(
+                            content=(
+                                "Completion deferred because a newer steering "
+                                "instruction arrived. Process it, then call end_task again."
+                            ),
+                            tool_call_id=tc_id,
+                            name=tool_name,
+                        ))
+                        break
+                    if not self.session_manager.try_begin_completion(session_id):
+                        # Steering may have landed between the final consume
+                        # and the atomic completion transition. Defer instead
+                        # of acknowledging a steering request we will ignore.
+                        inject_pending_steering()
+                        messages.append(ToolMessage(
+                            content=(
+                                "Completion deferred because session state changed. "
+                                "Process any steering instruction, then call end_task again."
+                            ),
+                            tool_call_id=tc_id,
+                            name=tool_name,
+                        ))
+                        break
                     final_result = self._dispatch_tool(tool_name, arguments, session_id=session_id)
                     end_task_called = True
                     break
@@ -985,18 +1046,6 @@ class ExecutorAgent:
 
             if end_task_called:
                 break
-
-            # Check for steering messages injected by the parent agent
-            # mid-execution. Each message is appended as a HumanMessage so
-            # the LLM treats it as new user input that modifies/refines the
-            # original instruction.
-            steering_messages = self.session_manager.consume_steering_messages(session_id)
-            for msg in steering_messages:
-                self.logger.info(
-                    "Injecting steering message",
-                    extra={"session_id": session_id, "message_preview": msg[:200]},
-                )
-                messages.append(HumanMessage(content=f"[STEERING INSTRUCTION]: {msg}"))
 
         if final_result is None:
             final_result = {"success": False, "report": "Agent reached max iterations without calling end_task."}

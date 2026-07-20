@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 load_dotenv()  # .env — system config, models, and LLM_API_KEY
@@ -37,6 +38,23 @@ SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "600"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
 CONTAINER_EXECUTOR_URL = os.getenv("CONTAINER_EXECUTOR_URL", "http://localhost:5001")
+_executor_url = urlsplit(CONTAINER_EXECUTOR_URL)
+if _executor_url.scheme not in {"http", "https"} or not _executor_url.hostname:
+    raise ValueError("CONTAINER_EXECUTOR_URL must be an absolute http(s) URL")
+EXECUTOR_MANAGEMENT_MODE = os.getenv("EXECUTOR_MANAGEMENT_MODE", "auto").strip().lower()
+if EXECUTOR_MANAGEMENT_MODE not in {"auto", "managed", "external"}:
+    raise ValueError(
+        "EXECUTOR_MANAGEMENT_MODE must be one of: auto, managed, external"
+    )
+EXECUTOR_HTTP_TIMEOUT_GRACE = float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "5"))
+if EXECUTOR_HTTP_TIMEOUT_GRACE < 1:
+    raise ValueError("EXECUTOR_HTTP_TIMEOUT_GRACE must be at least 1 second")
+EXECUTOR_API_TOKEN = os.getenv("EXECUTOR_API_TOKEN", "").strip()
+EXECUTOR_REQUIRE_AUTH = os.getenv("EXECUTOR_REQUIRE_AUTH", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+if EXECUTOR_REQUIRE_AUTH and not EXECUTOR_API_TOKEN:
+    raise ValueError("EXECUTOR_API_TOKEN is required when EXECUTOR_REQUIRE_AUTH=1")
 
 # WazzapAgents webhook is always-on (auto-restarts on crash). These
 # tunables control how aggressively we retry delivery and verify the
@@ -58,6 +76,10 @@ config = {
     "log_level": LOG_LEVEL,
     "flask_port": FLASK_PORT,
     "container_executor_url": CONTAINER_EXECUTOR_URL,
+    "executor_management_mode": EXECUTOR_MANAGEMENT_MODE,
+    "executor_http_timeout_grace": EXECUTOR_HTTP_TIMEOUT_GRACE,
+    "executor_api_token": EXECUTOR_API_TOKEN,
+    "executor_require_auth": EXECUTOR_REQUIRE_AUTH,
     "webhook_retry_max": WEBHOOK_RETRY_MAX,
     "webhook_retry_base_backoff": WEBHOOK_RETRY_BASE_BACKOFF,
     "webhook_retry_max_backoff": WEBHOOK_RETRY_MAX_BACKOFF,

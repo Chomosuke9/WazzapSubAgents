@@ -1,4 +1,3 @@
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,8 +16,12 @@ class TestDockerManagerInit:
             "docker.DockerClient",
             lambda **kwargs: (_ for _ in ()).throw(DockerException("no docker")),
         )
-        with pytest.raises(SystemExit):
+        with pytest.raises(RuntimeError, match="Docker daemon not available"):
             DockerManager()
+
+    def test_project_root_points_at_repository(self, mock_docker_client):
+        dm = DockerManager()
+        assert (dm.project_root / "src" / "docker_manager.py").is_file()
 
 
 class TestImageExists:
@@ -31,6 +34,27 @@ class TestImageExists:
         mock_docker_client.images.get.side_effect = ImageNotFound("not found")
         dm = DockerManager()
         assert dm.image_exists() is False
+
+    def test_image_is_current_checks_source_label(self, mock_docker_client, monkeypatch):
+        image = MagicMock()
+        image.attrs = {
+            "Config": {
+                "Labels": {
+                    DockerManager.SOURCE_LABEL: "current-hash",
+                },
+            },
+        }
+        mock_docker_client.images.get.return_value = image
+        dm = DockerManager()
+        monkeypatch.setattr(dm, "source_fingerprint", lambda: "current-hash")
+        assert dm.image_is_current() is True
+
+    def test_image_without_source_label_is_stale(self, mock_docker_client):
+        image = MagicMock()
+        image.attrs = {"Config": {"Labels": {}}}
+        mock_docker_client.images.get.return_value = image
+        dm = DockerManager()
+        assert dm.image_is_current() is False
 
 
 class TestContainerRunning:
@@ -46,6 +70,16 @@ class TestContainerRunning:
         mock_docker_client.containers.get.side_effect = docker.errors.NotFound("not found")
         dm = DockerManager()
         assert dm.container_running() is False
+
+    def test_container_image_identity_is_checked(self, mock_docker_client):
+        container = MagicMock()
+        container.image.id = "sha256:new"
+        image = MagicMock()
+        image.id = "sha256:new"
+        mock_docker_client.containers.get.return_value = container
+        mock_docker_client.images.get.return_value = image
+        dm = DockerManager()
+        assert dm.container_uses_current_image() is True
 
 
 class TestBuildImage:

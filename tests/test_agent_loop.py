@@ -261,6 +261,20 @@ def test_resolve_declared_output_files_only_returns_declared_paths(tmp_path):
     assert accepted == [str(deliverable.resolve())]
 
 
+def test_resolve_declared_output_files_resolves_relative_to_workdir(tmp_path):
+    workdir = tmp_path / "session-relative"
+    workdir.mkdir()
+    deliverable = workdir / "report.pdf"
+    deliverable.write_bytes(b"%PDF-relative")
+
+    agent = _make_resolver_agent()
+    accepted = agent._resolve_declared_output_files(
+        str(workdir), ["./report.pdf"], session_id="relative-output",
+    )
+
+    assert accepted == [str(deliverable.resolve())]
+
+
 def test_resolve_declared_output_files_allows_input_paths(tmp_path):
     """Paths inside ``<workdir>/input/`` are now allowed — the restriction
     was removed so agents can return original files if needed."""
@@ -389,7 +403,7 @@ def test_execute_injects_steering_message(mock_llm_class):
     consumed = []
 
     def _consume(session_id):
-        msgs = ["search for cats instead of animals"]
+        msgs = [] if consumed else ["search for cats instead of animals"]
         consumed.extend(msgs)
         return msgs
 

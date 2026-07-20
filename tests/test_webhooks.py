@@ -2,16 +2,19 @@
 Quick integration test for webhook push notification feature.
 No external HTTP server needed -- we monkeypatch _fire_webhook to collect payloads.
 """
-import json
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import requests as req_module
+
+import src.session_manager as sm_module
 
 from src.session_manager import SessionManager
 
 
 def test_webhook_flow():
     sm = SessionManager(idle_timeout=60)
-    session = sm.get_or_create("test-session-1")
+    sm.get_or_create("test-session-1")
 
     captured = []
 
@@ -101,10 +104,6 @@ if __name__ == "__main__":
 
 def test_413_strips_output_files_content_and_retries():
     """On 413, _fire_webhook strips output_files_content and retries with smaller payload."""
-    import threading
-    from unittest.mock import patch, MagicMock
-    import requests as req_module
-
     sm = SessionManager()
 
     # Build a response mock for 413
@@ -165,11 +164,6 @@ def test_413_strips_output_files_content_and_retries():
 
 def test_413_fallback_resets_attempt_counter():
     """After 413 fallback, attempt counter resets so stripped payload gets full retries."""
-    import threading
-    import src.session_manager as sm_module
-    from unittest.mock import patch, MagicMock
-    import requests as req_module
-
     sm = SessionManager()
 
     resp_413 = MagicMock()
@@ -230,10 +224,6 @@ def test_413_fallback_resets_attempt_counter():
 
 def test_413_no_double_strip():
     """Second 413 after strip does NOT re-strip; guard prevents infinite reset loop."""
-    import src.session_manager as sm_module
-    from unittest.mock import patch, MagicMock
-    import requests as req_module
-
     sm = SessionManager()
 
     resp_413 = MagicMock()
