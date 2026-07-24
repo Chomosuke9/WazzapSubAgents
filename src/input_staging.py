@@ -134,17 +134,23 @@ def _prepare_target_root(workdir: str) -> str:
     return real_target
 
 
-def _unique_destination(target_root: str, requested_name: str) -> tuple[str, str]:
+def _publish_unique(
+    temporary: str, target_root: str, requested_name: str
+) -> tuple[str, str]:
+    """Atomically publish a completed temp file without replacing a peer."""
     name = requested_name
     counter = 1
-    while os.path.lexists(os.path.join(target_root, name)):
-        stem, ext = os.path.splitext(requested_name)
-        name = f"{stem}_{counter}{ext}"
-        counter += 1
-    destination = os.path.join(target_root, name)
-    if not _inside(os.path.realpath(destination), target_root):
-        raise ValueError("destination resolves outside the session input directory")
-    return name, destination
+    while True:
+        destination = os.path.join(target_root, name)
+        if not _inside(os.path.realpath(destination), target_root):
+            raise ValueError("destination resolves outside the session input directory")
+        try:
+            os.link(temporary, destination)
+            return name, destination
+        except FileExistsError:
+            stem, ext = os.path.splitext(requested_name)
+            name = f"{stem}_{counter}{ext}"
+            counter += 1
 
 
 def _atomic_write(
@@ -154,7 +160,6 @@ def _atomic_write(
     *,
     max_bytes: int,
 ) -> tuple[str, int, str, str]:
-    stored_name, destination = _unique_destination(target_root, requested_name)
     fd, temporary = tempfile.mkstemp(prefix=".staging-", dir=target_root)
     digest = hashlib.sha256()
     size = 0
@@ -170,7 +175,13 @@ def _atomic_write(
                 digest.update(chunk)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        stored_name, destination = _publish_unique(
+            temporary, target_root, requested_name
+        )
+        try:
+            os.unlink(temporary)
+        except OSError as exc:
+            logger.warning("Could not remove staged temp link", extra={"error": str(exc)})
         return os.path.abspath(destination), size, digest.hexdigest(), stored_name
     except Exception:
         try:

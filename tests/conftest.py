@@ -14,6 +14,10 @@ def isolated_persistent_state(tmp_path, monkeypatch):
     # Keep them inside a bounded test-only root while production remains strict.
     monkeypatch.setenv("SUBAGENT_INPUT_SOURCE_ROOT", tempfile.gettempdir())
     monkeypatch.setenv("SUBAGENT_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("SUBAGENT_REQUIRE_API_AUTH", "0")
+    monkeypatch.setenv("SUBAGENT_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("EXECUTOR_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("EXECUTOR_BIND_HOST", "127.0.0.1")
 
 
 @pytest.fixture

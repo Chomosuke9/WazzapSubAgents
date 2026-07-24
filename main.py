@@ -1,3 +1,4 @@
+import os
 import time
 from urllib.parse import urlsplit
 
@@ -69,4 +70,4 @@ if __name__ == "__main__":
     app = build_app()
     port = config["flask_port"]
     logger.info("Starting Flask server", extra={"port": port})
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host=os.getenv("SUBAGENT_BIND_HOST", "127.0.0.1"), port=port, debug=False)

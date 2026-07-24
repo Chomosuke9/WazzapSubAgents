@@ -20,7 +20,11 @@ from src.container_client import ContainerClient
 from src.docker_manager import DockerManager
 from src.input_staging import rehydrate_staged_inputs, stage_request_inputs
 from src.logger import get_logger
-from src.session_manager import SessionManager, validate_session_id
+from src.session_manager import (
+    SessionManager,
+    SessionPersistenceError,
+    validate_session_id,
+)
 from src.upload_store import UploadError, UploadStore
 
 logger = get_logger(__name__)
@@ -30,7 +34,7 @@ _MAX_REQUEST_BYTES = int(
 )
 _MAX_INSTRUCTION_CHARS = int(os.getenv("SUBAGENT_MAX_INSTRUCTION_CHARS", "100000"))
 _API_TOKEN = os.getenv("SUBAGENT_API_TOKEN", "")
-_REQUIRE_API_AUTH = os.getenv("SUBAGENT_REQUIRE_API_AUTH", "auto").strip().lower()
+_REQUIRE_API_AUTH = os.getenv("SUBAGENT_REQUIRE_API_AUTH", "1").strip().lower()
 
 
 def _json_body() -> dict[str, Any]:
@@ -135,8 +139,12 @@ def _api_auth_error(*, require_configured: bool = False):
     if not _API_TOKEN:
         remote = request.remote_addr or ""
         loopback = remote in {"127.0.0.1", "::1", "localhost"}
-        explicitly_required = _REQUIRE_API_AUTH in {"1", "true", "yes", "on"}
-        if not require_configured and loopback and not explicitly_required:
+        require_auth = os.getenv(
+            "SUBAGENT_REQUIRE_API_AUTH", _REQUIRE_API_AUTH
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        bind_host = os.getenv("SUBAGENT_BIND_HOST", "127.0.0.1").strip()
+        loopback_bind = bind_host in {"127.0.0.1", "::1", "localhost"}
+        if not require_configured and loopback and loopback_bind and not require_auth:
             return None
         return jsonify({
             "success": False,
@@ -246,7 +254,15 @@ def create_app(
             return jsonify({"accepted": False, "success": False, "report": str(exc)}), 400
 
         fingerprint = _request_fingerprint(data)
-        session, begin_state = session_manager.begin_execution(session_id, fingerprint)
+        try:
+            session, begin_state = session_manager.begin_execution(session_id, fingerprint)
+        except SessionPersistenceError as exc:
+            return jsonify({
+                "accepted": False,
+                "success": False,
+                "session_id": session_id,
+                "report": str(exc),
+            }), 503
         if begin_state == "conflict":
             return jsonify({
                 "accepted": False,
@@ -653,7 +669,9 @@ def create_app(
             content_length = request.content_length
             if content_length is not None and content_length > upload_store.max_chunk_bytes:
                 raise UploadError("chunk exceeds configured size limit", code="chunk_too_large", status=413)
-            data = request.get_data(cache=False, as_text=False)
+            data = request.stream.read(upload_store.max_chunk_bytes + 1)
+            if len(data) > upload_store.max_chunk_bytes:
+                raise UploadError("chunk exceeds configured size limit", code="chunk_too_large", status=413)
             descriptor, replay = upload_store.put_chunk(
                 upload_id,
                 index,
@@ -696,6 +714,14 @@ def create_app(
     @app.errorhandler(BadRequest)
     def bad_request(error):
         return jsonify({"accepted": False, "success": False, "report": str(error)}), 400
+
+    @app.errorhandler(SessionPersistenceError)
+    def persistence_unavailable(error):
+        return jsonify({
+            "accepted": False,
+            "success": False,
+            "report": str(error),
+        }), 503
 
     @app.errorhandler(500)
     def internal_error(error):

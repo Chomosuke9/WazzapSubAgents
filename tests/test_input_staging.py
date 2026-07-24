@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64 as _base64
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -22,6 +23,7 @@ from src.input_staging import (
     is_input_path,
     stage_inputs_from_content,
     stage_inputs_into_workdir,
+    stage_request_inputs,
 )
 
 
@@ -158,6 +160,24 @@ def test_stage_inputs_from_content_handles_collision(workdir):
     # Verify distinct content survived
     contents = sorted(open(p, "rb").read() for p in result)
     assert contents == [b"first-content", b"second-content"]
+
+
+def test_concurrent_staging_never_overwrites_same_basename(workdir):
+    encoded = _base64.b64encode(b"same bytes").decode()
+
+    def stage_once(_index):
+        return stage_request_inputs(
+            workdir,
+            [],
+            [{"name": "same.bin", "content_base64": encoded}],
+            source_root=workdir,
+        ).paths[0]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(stage_once, range(20)))
+
+    assert len(set(paths)) == 20
+    assert all(open(path, "rb").read() == b"same bytes" for path in paths)
 
 
 def test_stage_inputs_from_content_skips_invalid_base64(workdir):

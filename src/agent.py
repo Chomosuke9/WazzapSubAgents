@@ -870,14 +870,10 @@ class ExecutorAgent:
                 f"{files_block}"
             )
         messages.append(HumanMessage(content=instruction))
-        seen_steering: set[str] = set()
-
         def inject_pending_steering() -> int:
             """Consume each queued steering instruction exactly once."""
-            pending = self.session_manager.consume_steering_messages(session_id)
-            fresh = [message for message in pending if message not in seen_steering]
+            fresh = self.session_manager.consume_steering_messages(session_id)
             for steering_message in fresh:
-                seen_steering.add(steering_message)
                 self.logger.info(
                     "Injecting steering message",
                     extra={

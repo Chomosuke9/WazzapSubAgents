@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -107,13 +108,14 @@ def test_javascript_respects_custom_timeout(client):
 
 def test_duplicate_request_id_executes_command_only_once(client):
     client_, _ = client
-    completed = MagicMock(stdout="once\n", stderr="", returncode=0)
     payload = {
         "command": "echo once",
         "session_id": "dedupe-test",
         "request_id": "request-idempotency-0001",
     }
-    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+    with patch(
+        "src.executor_server._run_bounded", return_value=("once\n", "", 0, None)
+    ) as run:
         first = client_.post("/bash", json=payload)
         second = client_.post("/bash", json=payload)
 
@@ -124,19 +126,47 @@ def test_duplicate_request_id_executes_command_only_once(client):
 
 def test_duplicate_request_survives_executor_app_restart(client):
     client_, _ = client
-    completed = MagicMock(stdout="durable\n", stderr="", returncode=0)
     payload = {
         "command": "echo durable",
         "session_id": "durable-dedupe",
         "request_id": "request-idempotency-0002",
     }
-    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+    with patch(
+        "src.executor_server._run_bounded", return_value=("durable\n", "", 0, None)
+    ) as run:
         first = client_.post("/bash", json=payload)
         restarted_client = create_executor_app().test_client()
         second = restarted_client.post("/bash", json=payload)
 
     assert first.get_json() == second.get_json()
     assert run.call_count == 1
+
+
+def test_corrupt_executor_receipt_fails_closed(client):
+    client_, base = client
+    request_id = "request-idempotency-corrupt"
+    session_dir = os.path.join(base, "corrupt-receipt")
+    receipt_dir = os.path.join(session_dir, ".executor_results")
+    os.makedirs(receipt_dir, exist_ok=True)
+    receipt_name = hashlib.sha256(
+        f"bash\0{request_id}".encode("utf-8")
+    ).hexdigest() + ".json"
+    with open(os.path.join(receipt_dir, receipt_name), "w", encoding="utf-8") as handle:
+        handle.write("{not-json")
+
+    with patch("src.executor_server._run_bounded") as run:
+        response = client_.post(
+            "/bash",
+            json={
+                "command": "echo must-not-run",
+                "session_id": "corrupt-receipt",
+                "request_id": request_id,
+            },
+        )
+
+    assert response.status_code == 503
+    assert "refusing" in response.get_json()["error"].lower()
+    run.assert_not_called()
 
 
 def test_rejects_non_object_json(client):
@@ -157,15 +187,65 @@ def test_executor_auth_rejects_missing_token(tmp_path, monkeypatch):
     )
     assert missing.status_code == 401
 
-    completed = MagicMock(stdout="ok\n", stderr="", returncode=0)
-    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+    with patch(
+        "src.executor_server._run_bounded", return_value=("ok\n", "", 0, None)
+    ) as run:
         accepted = authenticated_client.post(
             "/bash",
             json={"command": "echo yes", "session_id": "auth-test"},
             headers={"Authorization": "Bearer executor-secret"},
         )
     assert accepted.status_code == 200
-    assert "EXECUTOR_API_TOKEN" not in run.call_args.kwargs["env"]
+    assert "EXECUTOR_API_TOKEN" not in run.call_args.kwargs["isolation"]["env"]
+
+
+def test_request_id_rejects_different_command(client):
+    client_, _ = client
+    request_id = "request-idempotency-conflict"
+    with patch(
+        "src.executor_server._run_bounded", return_value=("once\n", "", 0, None)
+    ) as run:
+        first = client_.post(
+            "/bash",
+            json={"command": "echo one", "session_id": "conflict", "request_id": request_id},
+        )
+        conflict = client_.post(
+            "/bash",
+            json={"command": "echo two", "session_id": "conflict", "request_id": request_id},
+        )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert run.call_count == 1
+
+
+def test_executor_auth_defaults_to_required(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    monkeypatch.delenv("EXECUTOR_API_TOKEN", raising=False)
+    monkeypatch.delenv("EXECUTOR_REQUIRE_AUTH", raising=False)
+    with pytest.raises(RuntimeError, match="EXECUTOR_API_TOKEN"):
+        create_executor_app()
+
+
+def test_unauthenticated_executor_cannot_bind_non_loopback(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path))
+    monkeypatch.setenv("EXECUTOR_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("EXECUTOR_BIND_HOST", "0.0.0.0")
+    with pytest.raises(RuntimeError, match="loopback"):
+        create_executor_app()
+
+
+def test_executor_stops_and_reports_excessive_output(client, monkeypatch):
+    import src.executor_server as executor_module
+
+    monkeypatch.setattr(executor_module, "MAX_OUTPUT_BYTES", 1024)
+    client_, _ = client
+    response = client_.post(
+        "/python",
+        json={"code": "print('x' * 4096)", "session_id": "bounded-output"},
+    )
+    assert response.status_code == 200
+    assert "output exceeded" in response.get_json()["error"].lower()
 
 
 @pytest.mark.skipif(

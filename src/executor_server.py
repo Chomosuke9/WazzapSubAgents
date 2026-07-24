@@ -4,9 +4,12 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from typing import Callable
@@ -22,8 +25,14 @@ logger = get_logger("executor-server")
 MAX_TIMEOUT = 600  # 10 minutes
 MAX_REQUEST_BYTES = int(os.getenv("EXECUTOR_MAX_REQUEST_BYTES", str(2 * 1024 * 1024)))
 MAX_CACHED_RESULTS = int(os.getenv("EXECUTOR_MAX_CACHED_RESULTS", "1000"))
+MAX_OUTPUT_BYTES = int(os.getenv("EXECUTOR_MAX_OUTPUT_BYTES", str(4 * 1024 * 1024)))
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,199}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$")
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 REQUIRE_UID_ISOLATION = os.getenv(
     "EXECUTOR_REQUIRE_UID_ISOLATION", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
@@ -72,21 +81,115 @@ def _safe_remove(path: str) -> None:
         logger.warning("Failed to remove temp file %s: %s", path, exc)
 
 
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _run_bounded(
+    command: str | list[str],
+    *,
+    workdir: str,
+    timeout: int | float,
+    isolation: dict,
+) -> tuple[str, str, int, str | None]:
+    """Run a command without unbounded pipes and kill its whole process group."""
+    with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
+        mode="w+b"
+    ) as stderr_file:
+        options = dict(isolation)
+        if os.name == "nt":
+            options["creationflags"] = options.get("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            def _limit_output_files() -> None:
+                import resource
+
+                resource.setrlimit(
+                    resource.RLIMIT_FSIZE,
+                    (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES),
+                )
+
+            options["start_new_session"] = True
+            options["preexec_fn"] = _limit_output_files
+        process = subprocess.Popen(
+            command,
+            cwd=workdir,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=False,
+            **options,
+        )
+        deadline = time.monotonic() + timeout
+        failure: str | None = None
+        while process.poll() is None:
+            output_size = os.fstat(stdout_file.fileno()).st_size + os.fstat(
+                stderr_file.fileno()
+            ).st_size
+            if output_size > MAX_OUTPUT_BYTES:
+                failure = f"Execution output exceeded {MAX_OUTPUT_BYTES} byte limit"
+                _terminate_process_tree(process)
+                break
+            if time.monotonic() >= deadline:
+                failure = f"Execution timed out ({timeout}s)"
+                _terminate_process_tree(process)
+                break
+            time.sleep(0.02)
+        try:
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            returncode = process.wait(timeout=5)
+        final_output_size = os.fstat(stdout_file.fileno()).st_size + os.fstat(
+            stderr_file.fileno()
+        ).st_size
+        if failure is None and final_output_size >= MAX_OUTPUT_BYTES:
+            failure = f"Execution output exceeded {MAX_OUTPUT_BYTES} byte limit"
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        remaining = MAX_OUTPUT_BYTES
+        stdout_bytes = stdout_file.read(remaining)
+        remaining -= len(stdout_bytes)
+        stderr_bytes = stderr_file.read(remaining)
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        return stdout, stderr, returncode, failure
+
+
 def create_executor_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
     workdir_base = os.getenv("WORKDIR_BASE", "/storage/subagent_work")
+    bind_host = os.getenv("EXECUTOR_BIND_HOST", "127.0.0.1").strip()
     api_token = os.getenv("EXECUTOR_API_TOKEN", "").strip()
-    require_auth = os.getenv("EXECUTOR_REQUIRE_AUTH", "0").strip().lower() in {
+    require_auth = os.getenv("EXECUTOR_REQUIRE_AUTH", "1").strip().lower() in {
         "1", "true", "yes", "on",
     }
     if require_auth and not api_token:
         raise RuntimeError(
             "EXECUTOR_API_TOKEN is required when EXECUTOR_REQUIRE_AUTH=1"
         )
+    if not require_auth and bind_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise RuntimeError(
+            "Unauthenticated executor mode is allowed only on a loopback bind address"
+        )
     result_lock = threading.RLock()
-    result_cache: "OrderedDict[tuple[str, str, str], tuple[dict, int]]" = OrderedDict()
-    in_flight: dict[tuple[str, str, str], threading.Event] = {}
+    result_cache: "OrderedDict[tuple[str, str, str], tuple[str, dict, int]]" = OrderedDict()
+    in_flight: dict[tuple[str, str, str], tuple[str, threading.Event]] = {}
     uid_lock = threading.RLock()
     session_uids: dict[str, int] = {}
     used_uids: dict[int, str] = {}
@@ -283,6 +386,18 @@ def create_executor_app() -> Flask:
             return jsonify({"error": "Unauthorized executor request"}), 401
         return None
 
+    def _atomic_json(path: str, value: dict) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = f"{path}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as file_handle:
+                json.dump(value, file_handle, ensure_ascii=False)
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            _safe_remove(temporary)
+
     def _resolve_workdir(session_id: str) -> str:
         """Resolve the per-session workdir, applying the same sanitization
         as ``SessionManager.get_or_create`` so the path used here matches
@@ -297,6 +412,8 @@ def create_executor_app() -> Flask:
             raise ValueError(
                 "Invalid session_id: use 1-200 letters, digits, @, dot, underscore, or hyphen"
             )
+        if session_id.endswith(".") or session_id.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+            raise ValueError("Invalid session_id: reserved or filesystem-ambiguous name")
         safe = session_id
         real_base = os.path.realpath(workdir_base)
         resolved = os.path.realpath(os.path.join(real_base, safe))
@@ -332,6 +449,7 @@ def create_executor_app() -> Flask:
         workdir: str,
         operation_name: str,
         request_id: str,
+        fingerprint: str,
         operation: Callable[[], tuple[dict, int]],
     ) -> tuple[dict, int]:
         """Execute one request id once, sharing its result with retries."""
@@ -345,26 +463,46 @@ def create_executor_app() -> Flask:
         try:
             with open(cache_path, "r", encoding="utf-8") as file_handle:
                 durable = json.load(file_handle)
+        except FileNotFoundError:
+            durable = None
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error(
+                "Executor receipt is unreadable; refusing possible re-execution",
+                extra={"request_id": request_id, "error": str(exc)},
+            )
+            return {"error": "Executor receipt is unreadable; refusing to execute again"}, 503
+        if durable is not None:
+            if not isinstance(durable, dict) or durable.get("fingerprint") != fingerprint:
+                return {"error": "request_id is already bound to different input"}, 409
+            state = durable.get("state")
+            if state == "running":
+                return {"error": "Previous execution outcome is indeterminate; refusing to execute it again"}, 503
             if (
-                isinstance(durable, dict)
-                and isinstance(durable.get("payload"), dict)
-                and isinstance(durable.get("status"), int)
+                state != "complete"
+                or not isinstance(durable.get("payload"), dict)
+                or isinstance(durable.get("status"), bool)
+                or not isinstance(durable.get("status"), int)
             ):
-                return durable["payload"], durable["status"]
-        except (OSError, ValueError, TypeError):
-            pass
+                return {"error": "Executor receipt is invalid; refusing to execute again"}, 503
+            return durable["payload"], durable["status"]
 
         owner = False
         with result_lock:
             cached = result_cache.get(key)
             if cached is not None:
                 result_cache.move_to_end(key)
-                return cached
-            event = in_flight.get(key)
-            if event is None:
+                if cached[0] != fingerprint:
+                    return {"error": "request_id is already bound to different input"}, 409
+                return cached[1], cached[2]
+            flight = in_flight.get(key)
+            if flight is None:
                 event = threading.Event()
-                in_flight[key] = event
+                in_flight[key] = (fingerprint, event)
                 owner = True
+            else:
+                active_fingerprint, event = flight
+                if active_fingerprint != fingerprint:
+                    return {"error": "request_id is already bound to different input"}, 409
 
         if not owner:
             if not event.wait(MAX_TIMEOUT + 30):
@@ -374,29 +512,42 @@ def create_executor_app() -> Flask:
                 if cached is None:
                     return {"error": "Original request failed before producing a result"}, 503
                 result_cache.move_to_end(key)
-                return cached
+                return cached[1], cached[2]
 
         try:
-            response = operation()
             try:
-                os.makedirs(cache_dir, exist_ok=True)
-                temp_path = f"{cache_path}.{uuid.uuid4().hex}.tmp"
-                with open(temp_path, "w", encoding="utf-8") as file_handle:
-                    json.dump(
-                        {"payload": response[0], "status": response[1]},
-                        file_handle,
-                        ensure_ascii=False,
-                    )
-                    file_handle.flush()
-                    os.fsync(file_handle.fileno())
-                os.replace(temp_path, cache_path)
+                _atomic_json(
+                    cache_path,
+                    {"fingerprint": fingerprint, "state": "running"},
+                )
             except OSError as exc:
-                logger.warning(
-                    "Failed to persist executor idempotency result",
+                logger.error(
+                    "Refusing execution because idempotency claim could not be persisted",
                     extra={"request_id": request_id, "error": str(exc)},
                 )
+                return {"error": "Executor receipt storage is unavailable"}, 503
+            response = operation()
+            try:
+                _atomic_json(
+                    cache_path,
+                    {
+                        "fingerprint": fingerprint,
+                        "state": "complete",
+                        "payload": response[0],
+                        "status": response[1],
+                    },
+                )
+            except OSError as exc:
+                logger.error(
+                    "Executor completed but its result receipt could not be persisted",
+                    extra={"request_id": request_id, "error": str(exc)},
+                )
+                with result_lock:
+                    result_cache[key] = (fingerprint, response[0], response[1])
+                    result_cache.move_to_end(key)
+                return {"error": "Execution completed but its durable receipt is unavailable"}, 503
             with result_lock:
-                result_cache[key] = response
+                result_cache[key] = (fingerprint, response[0], response[1])
                 result_cache.move_to_end(key)
                 while len(result_cache) > MAX_CACHED_RESULTS:
                     result_cache.popitem(last=False)
@@ -414,6 +565,9 @@ def create_executor_app() -> Flask:
             return jsonify(error), status
         data, workdir, request_id, timeout = parsed
         command = data["command"]
+        fingerprint = hashlib.sha256(
+            json.dumps({"command": command, "timeout": timeout}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         session_id = data.get("session_id", "default")
         os.makedirs(workdir, exist_ok=True)
         try:
@@ -425,28 +579,25 @@ def create_executor_app() -> Flask:
 
         def operation() -> tuple[dict, int]:
             try:
-                result = subprocess.run(
+                stdout, stderr, returncode, failure = _run_bounded(
                     command,
-                    cwd=workdir,
-                    capture_output=True,
-                    shell=True,
-                    text=True,
+                    workdir=workdir,
                     timeout=timeout,
-                    **isolation,
+                    isolation={**isolation, "shell": True},
                 )
+                if failure:
+                    return {"error": f"Bash {failure.lower()}", "request_id": request_id}, 200
                 return {
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "returncode": result.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "returncode": returncode,
                     "request_id": request_id,
                 }, 200
-            except subprocess.TimeoutExpired:
-                return {
-                    "error": f"Bash execution timed out ({timeout}s)",
-                    "request_id": request_id,
-                }, 200
+            except Exception as exc:
+                logger.error("Bash execution failed", exc_info=True)
+                return {"error": str(exc), "request_id": request_id}, 500
 
-        payload, status = _execute_idempotently(workdir, "bash", request_id, operation)
+        payload, status = _execute_idempotently(workdir, "bash", request_id, fingerprint, operation)
         return jsonify(payload), status
 
     @app.post("/javascript")
@@ -457,6 +608,9 @@ def create_executor_app() -> Flask:
             return jsonify(error), status
         data, workdir, request_id, timeout = parsed
         code = data["code"]
+        fingerprint = hashlib.sha256(
+            json.dumps({"code": code, "timeout": timeout}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         session_id = data.get("session_id", "default")
         os.makedirs(workdir, exist_ok=True)
         try:
@@ -471,23 +625,18 @@ def create_executor_app() -> Flask:
             try:
                 with open(js_file, "w", encoding="utf-8") as file_handle:
                     file_handle.write(code)
-                result = subprocess.run(
+                stdout, stderr, returncode, failure = _run_bounded(
                     ["node", js_file],
-                    cwd=workdir,
-                    capture_output=True,
-                    text=True,
+                    workdir=workdir,
                     timeout=timeout,
-                    **isolation,
+                    isolation=isolation,
                 )
+                if failure:
+                    return {"error": f"Javascript {failure.lower()}", "request_id": request_id}, 200
                 return {
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "returncode": result.returncode,
-                    "request_id": request_id,
-                }, 200
-            except subprocess.TimeoutExpired:
-                return {
-                    "error": f"Javascript execution timed out ({timeout}s)",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "returncode": returncode,
                     "request_id": request_id,
                 }, 200
             except Exception as exc:
@@ -496,7 +645,7 @@ def create_executor_app() -> Flask:
             finally:
                 _safe_remove(js_file)
 
-        payload, status = _execute_idempotently(workdir, "javascript", request_id, operation)
+        payload, status = _execute_idempotently(workdir, "javascript", request_id, fingerprint, operation)
         return jsonify(payload), status
 
     @app.post("/python")
@@ -507,6 +656,9 @@ def create_executor_app() -> Flask:
             return jsonify(error), status
         data, workdir, request_id, timeout = parsed
         code = data["code"]
+        fingerprint = hashlib.sha256(
+            json.dumps({"code": code, "timeout": timeout}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         session_id = data.get("session_id", "default")
         os.makedirs(workdir, exist_ok=True)
         try:
@@ -525,23 +677,18 @@ def create_executor_app() -> Flask:
             try:
                 with open(py_file, "w", encoding="utf-8") as file_handle:
                     file_handle.write(code)
-                result = subprocess.run(
+                stdout, stderr, returncode, failure = _run_bounded(
                     [sys.executable, py_file],
-                    cwd=workdir,
-                    capture_output=True,
-                    text=True,
+                    workdir=workdir,
                     timeout=timeout,
-                    **isolation,
+                    isolation=isolation,
                 )
+                if failure:
+                    return {"error": f"Python {failure.lower()}", "request_id": request_id}, 200
                 return {
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "returncode": result.returncode,
-                    "request_id": request_id,
-                }, 200
-            except subprocess.TimeoutExpired:
-                return {
-                    "error": f"Python execution timed out ({timeout}s)",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "returncode": returncode,
                     "request_id": request_id,
                 }, 200
             except Exception as exc:
@@ -550,7 +697,7 @@ def create_executor_app() -> Flask:
             finally:
                 _safe_remove(py_file)
 
-        payload, status = _execute_idempotently(workdir, "python", request_id, operation)
+        payload, status = _execute_idempotently(workdir, "python", request_id, fingerprint, operation)
         return jsonify(payload), status
 
     @app.get("/health")
@@ -563,4 +710,4 @@ def create_executor_app() -> Flask:
 if __name__ == "__main__":
     port = int(os.getenv("FLASK_PORT", "5001"))
     app = create_executor_app()
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host=os.getenv("EXECUTOR_BIND_HOST", "127.0.0.1"), port=port, debug=False)

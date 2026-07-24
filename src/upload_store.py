@@ -61,6 +61,8 @@ class UploadStore:
         self.max_file_bytes = int(os.getenv("SUBAGENT_MAX_UPLOAD_FILE_BYTES", str(200 * 1024 * 1024)))
         self.max_total_bytes = int(os.getenv("SUBAGENT_MAX_UPLOAD_TOTAL_BYTES", str(512 * 1024 * 1024)))
         self.max_chunk_bytes = int(os.getenv("SUBAGENT_MAX_UPLOAD_CHUNK_BYTES", str(8 * 1024 * 1024)))
+        self.max_chunks = int(os.getenv("SUBAGENT_MAX_UPLOAD_CHUNKS", "4096"))
+        self.max_active_uploads = int(os.getenv("SUBAGENT_MAX_ACTIVE_UPLOADS", "1024"))
         self.incomplete_ttl = int(os.getenv("SUBAGENT_UPLOAD_INCOMPLETE_TTL_S", "900"))
         self.complete_ttl = int(os.getenv("SUBAGENT_UPLOAD_COMPLETE_TTL_S", "3600"))
         self._lock = threading.RLock()
@@ -122,6 +124,18 @@ class UploadStore:
                 continue
         return total
 
+    def _active_upload_count(self) -> int:
+        total = 0
+        for name in os.listdir(self.root):
+            if not UPLOAD_ID_PATTERN.fullmatch(name):
+                continue
+            try:
+                if self._read(name).get("state") != "consumed":
+                    total += 1
+            except (UploadError, TypeError, ValueError):
+                continue
+        return total
+
     def initiate(
         self,
         *,
@@ -156,7 +170,12 @@ class UploadStore:
                     code="upload_quota_exceeded",
                     status=429,
                 )
-            os.makedirs(os.path.join(directory, "chunks"), exist_ok=False)
+            if self._active_upload_count() >= self.max_active_uploads:
+                raise UploadError(
+                    "active upload count quota would be exceeded",
+                    code="upload_count_exceeded",
+                    status=429,
+                )
             now = time.time()
             metadata = {
                 "version": 1,
@@ -170,7 +189,13 @@ class UploadStore:
                 "created_at": now,
                 "last_activity": now,
             }
-            self._atomic_json(self._metadata_path(upload_id), metadata)
+            try:
+                os.makedirs(os.path.join(directory, "chunks"), exist_ok=False)
+                self._atomic_json(self._metadata_path(upload_id), metadata)
+            except Exception:
+                if os.path.isdir(directory) and not os.path.islink(directory):
+                    shutil.rmtree(directory, ignore_errors=True)
+                raise
             return metadata, False
 
     def put_chunk(
@@ -180,8 +205,8 @@ class UploadStore:
         content_range: str | None,
         data: bytes,
     ) -> tuple[dict[str, Any], bool]:
-        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index > 100000:
-            raise UploadError("chunk index must be an integer between 0 and 100000")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= self.max_chunks:
+            raise UploadError(f"chunk index must be an integer between 0 and {self.max_chunks - 1}")
         start, end, total = parse_content_range(content_range)
         if len(data) != end - start + 1:
             raise UploadError("chunk length does not match Content-Range")
@@ -201,6 +226,8 @@ class UploadStore:
                 if existing != descriptor:
                     raise UploadError("chunk index is already bound to different bytes", code="chunk_conflict", status=409)
                 return descriptor, True
+            if len(metadata["chunks"]) >= self.max_chunks:
+                raise UploadError("upload has too many chunks", code="too_many_chunks", status=413)
             for other in metadata["chunks"].values():
                 if not (end < other["start"] or start > other["end"]):
                     raise UploadError("chunk byte range overlaps another chunk", code="chunk_overlap", status=409)
@@ -270,9 +297,9 @@ class UploadStore:
                 except FileNotFoundError:
                     pass
                 raise
-            shutil.rmtree(os.path.join(directory, "chunks"), ignore_errors=True)
             metadata.update(state="complete", completed_at=time.time(), last_activity=time.time())
             self._atomic_json(self._metadata_path(upload_id), metadata)
+            shutil.rmtree(os.path.join(directory, "chunks"), ignore_errors=True)
             return metadata, False
 
     def claim(self, upload_id: str, session_id: str) -> dict[str, Any]:

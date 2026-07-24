@@ -30,14 +30,14 @@ RUN apt-get update && apt-get install -y \
 RUN python -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 RUN pip install --no-cache-dir \
-    Flask>=3.1.3 \
-    langchain>=1.2.0 \
-    langchain-openai>=1.2.0 \
-    openai>=2.0.0 \
-    python-dotenv>=1.2.2 \
-    requests>=2.33.1 \
-    docker>=7.1.0 \
-    python-json-logger>=3.3.0 \
+    "Flask>=3.1.3" \
+    "langchain>=1.2.0" \
+    "langchain-openai>=1.2.0" \
+    "openai>=2.0.0" \
+    "python-dotenv>=1.2.2" \
+    "requests>=2.33.1" \
+    "docker>=7.1.0" \
+    "python-json-logger>=3.3.0" \
     pdfplumber \
     pdf2image \
     pypdf \

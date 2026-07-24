@@ -223,18 +223,22 @@ Both **`.env`** and **`.env.secrets`** are git-ignored. Docker Compose loads bot
 | `EXECUTOR_MANAGEMENT_MODE` | No | `auto` | `managed` lets a native host own Docker; `external` uses an existing sidecar. Compose sets `external`. |
 | `EXECUTOR_HTTP_TIMEOUT_GRACE` | No | 5 | Response-delivery grace added after a tool execution timeout. |
 | `EXECUTOR_API_TOKEN` | Compose: Yes | — | Long random bearer token authenticating main-service tool calls to the executor. |
-| `EXECUTOR_REQUIRE_AUTH` | No | 0 (`1` in Compose) | Fail startup when executor authentication is required but no token is configured. |
+| `EXECUTOR_REQUIRE_AUTH` | No | 1 | Fail startup when executor authentication is required but no token is configured. Set `0` only for loopback-only development. |
+| `EXECUTOR_BIND_HOST` | No | `127.0.0.1` | Executor listen address. Unauthenticated mode refuses non-loopback binds. |
+| `EXECUTOR_MAX_OUTPUT_BYTES` | No | 4194304 | Combined stdout/stderr cap per tool execution. |
 | `EXECUTOR_REQUIRE_UID_ISOLATION` | No | 1 | Fail closed unless Linux can run every session under a private UID and 0700 workdir. |
 | `EXECUTOR_PARENT_UID` | No | 0 | Parent service UID granted explicit ACL access; managed native mode sets it automatically. |
 | `EXECUTOR_TOOL_ENV_PASSTHROUGH` | No | `BRAVE_SEARCH_API_KEY` | Comma-separated skill variables exposed to tools; service credentials remain blocked. |
 | `SUBAGENT_API_TOKEN` | Remote/Compose: Yes | — | Bearer credential for parent calls to execute, steer, status, upload, and output-download endpoints. |
-| `SUBAGENT_REQUIRE_API_AUTH` | No | `auto` | `auto` permits unauthenticated loopback development only; set `1` to fail closed everywhere. |
+| `SUBAGENT_REQUIRE_API_AUTH` | No | 1 | Require API authentication. Set `0` only for loopback-only development. |
+| `SUBAGENT_BIND_HOST` | No | `127.0.0.1` | Main API listen address; Compose explicitly binds inside its private network. |
 | `SUBAGENT_WEBHOOK_TOKEN` | Compose: Yes | — | Separate token sent by this service to authenticate callbacks at WazzapAgents. |
 | `SESSION_IDLE_TIMEOUT` | No | 600 | Session result idle timeout (seconds) |
 | `LOG_LEVEL` | No | INFO | Logging level |
 | `WORKDIR_BASE` | No | `/tmp/work` (native) / `/storage/subagent_work` (compose) | Base directory for per-session workdirs. Must be on a filesystem the bridge can read so it can pick up `output_files`. |
-| `SUBAGENT_STORAGE_DIR` | No | `/storage` | Host directory bind-mounted to `/storage` inside both containers. Used as the cross-process exchange for input/output files. |
-| `SUBAGENT_WORKDIR_BASE` | No | `/storage/subagent_work` | docker-compose-only override of `WORKDIR_BASE` keeping it inside the shared mount. |
+| `SUBAGENT_HOST_STORAGE_DIR` | No | `/storage` | Host directory bind-mounted to the fixed `/storage` container path. |
+| `SUBAGENT_MAX_UPLOAD_CHUNKS` | No | 4096 | Maximum number of chunks accepted for one resumable upload. |
+| `SUBAGENT_MAX_ACTIVE_UPLOADS` | No | 1024 | Maximum number of incomplete or unconsumed uploads. |
 
 ---
 
@@ -263,7 +267,7 @@ The default contract used by `docker-compose.yml`:
 | Per-session workdir / outputs | `/storage/subagent_work/<session_id>/` | same |
 
 The directories are unified under `/storage` for local fast-path use (override via
-`SUBAGENT_STORAGE_DIR` on the host side and the matching env on the
+`SUBAGENT_HOST_STORAGE_DIR` on the host side and the matching env on the
 WazzapAgents side). The `executor-service` main container stages verified
 copies into the workdir before the isolated executor reads them, and
 `host.docker.internal` is wired in via

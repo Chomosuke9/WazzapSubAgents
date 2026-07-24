@@ -7,7 +7,8 @@ import pytest
 
 from src.app import create_app
 from src.input_staging import stage_request_inputs
-from src.session_manager import SessionManager
+from src.session_manager import SessionManager, SessionPersistenceError
+from src.upload_store import UploadStore
 
 
 @pytest.fixture
@@ -386,3 +387,111 @@ def test_api_token_rejects_missing_or_wrong_bearer(protocol, monkeypatch):
         json=payload,
         headers={"Authorization": "Bearer wrong"},
     ).status_code == 401
+
+
+def test_restart_turns_abandoned_active_session_into_terminal_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(tmp_path / "state"))
+    manager = SessionManager(idle_timeout=600)
+    manager.begin_execution("interrupted", "fingerprint")
+    manager.mark_execution_started("interrupted")
+
+    restarted = SessionManager(idle_timeout=600)
+    session = restarted.get_session("interrupted")
+    assert session is not None
+    assert session.status == "completed"
+    assert session.result["error_code"] == "interrupted_by_restart"
+
+
+def test_new_session_fails_closed_when_state_cannot_be_persisted(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(tmp_path / "state"))
+    manager = SessionManager(idle_timeout=600)
+    monkeypatch.setattr(manager, "_atomic_json", MagicMock(side_effect=OSError("disk full")))
+
+    with pytest.raises(SessionPersistenceError, match="Could not persist"):
+        manager.get_or_create("not-accepted")
+    assert manager.get_session("not-accepted") is None
+
+
+def test_corrupt_session_state_blocks_session_id_reuse(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "corrupt-session.json").write_text("{not-json", encoding="utf-8")
+    monkeypatch.setenv("WORKDIR_BASE", str(work))
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(state))
+
+    manager = SessionManager(idle_timeout=600)
+    with pytest.raises(SessionPersistenceError, match="unreadable durable state"):
+        manager.begin_execution("corrupt-session", "fingerprint")
+
+
+def test_completion_sequence_remains_stable_after_late_progress(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(tmp_path / "state"))
+    manager = SessionManager(idle_timeout=600)
+    manager.get_or_create("stable-completion")
+    manager.set_callback(
+        "stable-completion",
+        "http://callback.invalid/complete",
+        "http://callback.invalid/progress",
+    )
+
+    with patch.object(manager, "_fire_webhook"):
+        manager.store_result(
+            "stable-completion",
+            {"success": True, "report": "done", "output_files": []},
+        )
+        session = manager.get_session("stable-completion")
+        assert session is not None
+        completion_sequence = session.callback_sequence
+        manager.append_progress("stable-completion", {"step": "late"})
+
+    assert completion_sequence > 0
+    assert session.event_sequence > completion_sequence
+    assert session.callback_sequence == completion_sequence
+
+    restarted = SessionManager(idle_timeout=600)
+    recovered = restarted.get_session("stable-completion")
+    assert recovered is not None
+    assert recovered.callback_sequence == completion_sequence
+    assert recovered.next_delivery_sequence == completion_sequence
+
+
+def test_cleanup_does_not_release_session_id_when_state_removal_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(tmp_path / "state"))
+    manager = SessionManager(idle_timeout=600)
+    manager.get_or_create("cleanup-failure")
+    state_path = manager._state_path("cleanup-failure")
+    original_unlink = os.unlink
+
+    def fail_state_unlink(path):
+        if os.path.realpath(path) == os.path.realpath(state_path):
+            raise OSError("state is locked")
+        return original_unlink(path)
+
+    monkeypatch.setattr("src.session_manager.os.unlink", fail_state_unlink)
+    manager.cleanup_session("cleanup-failure")
+
+    assert manager.get_session("cleanup-failure") is not None
+    assert os.path.isfile(state_path)
+
+
+def test_upload_keeps_chunks_if_complete_metadata_write_fails(tmp_path, monkeypatch):
+    store = UploadStore(str(tmp_path / "uploads"))
+    content = b"durable upload"
+    upload_id = "b" * 32
+    store.initiate(
+        upload_id=upload_id,
+        filename="input.bin",
+        size=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+    store.put_chunk(upload_id, 0, f"bytes 0-{len(content) - 1}/{len(content)}", content)
+    monkeypatch.setattr(store, "_atomic_json", MagicMock(side_effect=OSError("disk full")))
+
+    with pytest.raises(OSError, match="disk full"):
+        store.complete(upload_id)
+    assert os.path.isdir(os.path.join(store._directory(upload_id), "chunks"))

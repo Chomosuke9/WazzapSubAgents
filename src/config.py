@@ -50,7 +50,7 @@ EXECUTOR_HTTP_TIMEOUT_GRACE = float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "5"
 if EXECUTOR_HTTP_TIMEOUT_GRACE < 1:
     raise ValueError("EXECUTOR_HTTP_TIMEOUT_GRACE must be at least 1 second")
 EXECUTOR_API_TOKEN = os.getenv("EXECUTOR_API_TOKEN", "").strip()
-EXECUTOR_REQUIRE_AUTH = os.getenv("EXECUTOR_REQUIRE_AUTH", "0").strip().lower() in {
+EXECUTOR_REQUIRE_AUTH = os.getenv("EXECUTOR_REQUIRE_AUTH", "1").strip().lower() in {
     "1", "true", "yes", "on",
 }
 if EXECUTOR_REQUIRE_AUTH and not EXECUTOR_API_TOKEN:

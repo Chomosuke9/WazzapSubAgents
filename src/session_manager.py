@@ -39,6 +39,15 @@ _OUTBOX_RETRY_INTERVAL = float(os.getenv("SUBAGENT_OUTBOX_RETRY_INTERVAL", "30")
 _WEBHOOK_TOKEN = os.getenv("SUBAGENT_WEBHOOK_TOKEN", "")
 
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,199}$")
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+class SessionPersistenceError(RuntimeError):
+    """Raised when the service cannot durably record a session transition."""
 
 
 def validate_session_id(session_id: Any) -> str:
@@ -57,6 +66,8 @@ def validate_session_id(session_id: Any) -> str:
         raise ValueError(
             "Invalid session_id: expected [A-Za-z0-9][A-Za-z0-9@._-]{0,199}"
         )
+    if session_id.endswith(".") or session_id.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        raise ValueError("Invalid session_id: reserved or filesystem-ambiguous name")
     return session_id
 
 
@@ -212,7 +223,9 @@ class Session:
     steering_messages: list[SteeringEnvelope] = field(default_factory=list)
     messages: Optional[list] = None
     event_sequence: int = 0
+    callback_sequence: int = 0
     next_delivery_sequence: int = 1
+    persistence_error: bool = field(default=False, repr=False, compare=False)
     delivery_condition: threading.Condition = field(
         default_factory=threading.Condition, repr=False, compare=False
     )
@@ -231,7 +244,10 @@ class SessionManager:
         )
         self._outbox_dir = os.path.join(self._state_dir, "outbox")
         self._deliveries_inflight: set[tuple[str, int, str]] = set()
+        self._workdir_owners: dict[str, str] = {}
+        self._blocked_session_ids: set[str] = set()
         self._load_state()
+        self._recover_interrupted_sessions()
         self._cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
         self._cleanup_thread.start()
         self._outbox_thread = threading.Thread(target=self._outbox_loop, daemon=True)
@@ -277,12 +293,21 @@ class SessionManager:
             "steering_messages": [asdict(item) for item in session.steering_messages],
             "messages": session.messages,
             "event_sequence": session.event_sequence,
+            "callback_sequence": session.callback_sequence,
             "next_delivery_sequence": session.next_delivery_sequence,
         }
         try:
             self._atomic_json(self._state_path(session.session_id), value)
+            session.persistence_error = False
         except Exception as exc:  # pylint: disable=broad-except
-            logger.error("Failed to persist session state", extra={"session_id": session.session_id, "error": str(exc)})
+            session.persistence_error = True
+            logger.error(
+                "Failed to persist session state",
+                extra={"session_id": session.session_id, "error": str(exc)},
+            )
+            raise SessionPersistenceError(
+                f"Could not persist session {session.session_id}"
+            ) from exc
 
     def _load_state(self) -> None:
         if not os.path.isdir(self._state_dir):
@@ -300,13 +325,16 @@ class SessionManager:
                 steering = [SteeringEnvelope(**item) for item in value.get("steering_messages", [])]
                 pending_callback = bool(value.get("callback_pending")) and not bool(value.get("callback_sent"))
                 event_sequence = int(value.get("event_sequence", 0))
+                callback_sequence = int(value.get("callback_sequence", 0))
+                if pending_callback and callback_sequence <= 0:
+                    callback_sequence = event_sequence
                 next_delivery_sequence = int(value.get("next_delivery_sequence", 1))
                 # Progress events are intentionally not durable. After a
                 # process restart, let the durable completion advance even if
                 # an earlier in-flight progress event vanished with the old
                 # process.
-                if pending_callback and event_sequence:
-                    next_delivery_sequence = event_sequence
+                if pending_callback and callback_sequence:
+                    next_delivery_sequence = callback_sequence
                 session = Session(
                     session_id=session_id,
                     workdir=expected_workdir,
@@ -325,15 +353,50 @@ class SessionManager:
                     steering_messages=steering,
                     messages=value.get("messages"),
                     event_sequence=event_sequence,
+                    callback_sequence=callback_sequence,
                     next_delivery_sequence=next_delivery_sequence,
                 )
+                filesystem_key = os.path.normcase(expected_workdir)
+                owner = self._workdir_owners.get(filesystem_key)
+                if owner is not None and owner != session_id:
+                    raise ValueError("persisted session ids alias the same workdir")
+                self._workdir_owners[filesystem_key] = session_id
                 self._sessions[session_id] = session
             except Exception as exc:  # pylint: disable=broad-except
                 logger.error("Ignoring invalid persisted session state", extra={"file": filename, "error": str(exc)})
+                candidate = os.path.splitext(filename)[0]
+                try:
+                    self._blocked_session_ids.add(validate_session_id(candidate))
+                except ValueError:
+                    pass
+
+    def _recover_interrupted_sessions(self) -> None:
+        """Turn work lost to a process restart into a durable terminal result."""
+        interrupted = [
+            session.session_id
+            for session in self._sessions.values()
+            if session.status in {"active", "completing"}
+        ]
+        for session_id in interrupted:
+            self.store_result(
+                session_id,
+                {
+                    "session_id": session_id,
+                    "success": False,
+                    "report": "Subagent process restarted before this task completed; retry with a new session_id",
+                    "output_files": [],
+                    "processing_time_sec": 0,
+                    "error_code": "interrupted_by_restart",
+                },
+            )
 
     def get_or_create(self, session_id: str) -> Session:
         session_id = validate_session_id(session_id)
         with self._lock:
+            if session_id in self._blocked_session_ids:
+                raise SessionPersistenceError(
+                    f"Session {session_id} has unreadable durable state and cannot be reused"
+                )
             existing = self._sessions.get(session_id)
             if existing is not None:
                 existing.last_activity = time.time()
@@ -346,10 +409,23 @@ class SessionManager:
                 raise ValueError("Invalid session_id: resolves outside workdir base")
             if os.path.lexists(workdir) and os.path.islink(workdir):
                 raise ValueError("Session workdir must not be a symlink")
+            filesystem_key = os.path.normcase(workdir)
+            owner = self._workdir_owners.get(filesystem_key)
+            if owner is not None and owner != session_id:
+                raise ValueError("Invalid session_id: aliases an existing session workdir")
             os.makedirs(workdir, exist_ok=True)
             session = Session(session_id=session_id, workdir=workdir)
             self._sessions[session_id] = session
-            self._persist_session_locked(session)
+            try:
+                self._persist_session_locked(session)
+            except SessionPersistenceError:
+                self._sessions.pop(session_id, None)
+                try:
+                    os.rmdir(workdir)
+                except OSError:
+                    pass
+                raise
+            self._workdir_owners[filesystem_key] = session_id
             logger.info("Session created", extra={"session_id": session_id, "workdir": workdir})
             return session
 
@@ -357,6 +433,10 @@ class SessionManager:
         """Atomically create/claim a request: ``new``, ``replay``, or ``conflict``."""
         with self._lock:
             session = self.get_or_create(session_id)
+            if session.persistence_error:
+                raise SessionPersistenceError(
+                    f"Session {session_id} is blocked by an earlier persistence failure"
+                )
             if session.request_fingerprint is None:
                 session.request_fingerprint = fingerprint
                 self._persist_session_locked(session)
@@ -507,6 +587,7 @@ class SessionManager:
                         "result": session.callback_result,
                     },
                 )
+                session.callback_sequence = int(payload["sequence"])
                 callback = (session.callback_url, payload)
             self._persist_session_locked(session)
         if callback:
@@ -550,12 +631,8 @@ class SessionManager:
         if payload.get("type") != "complete":
             return None
         path = self._outbox_path(payload)
-        try:
-            self._atomic_json(path, {"url": url, "payload": payload})
-            return path
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.error("Failed to persist completion outbox", extra={"error": str(exc)})
-            return None
+        self._atomic_json(path, {"url": url, "payload": payload})
+        return path
 
     def _mark_delivery_success(self, payload: dict[str, Any], outbox_path: str | None) -> None:
         if outbox_path:
@@ -585,7 +662,14 @@ class SessionManager:
 
     def _fire_webhook(self, url: str, payload: dict) -> None:
         """Persist completion before send; retry without claiming premature success."""
-        outbox_path = self._persist_outbox(url, payload)
+        try:
+            outbox_path = self._persist_outbox(url, payload)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(
+                "Webhook not sent because its durable outbox write failed",
+                extra={"url": url, "error": str(exc), "session_id": payload.get("session_id")},
+            )
+            return
         max_attempts = _WEBHOOK_RETRY_MAX
         delivery_key = (
             str(payload.get("session_id", "")),
@@ -673,20 +757,41 @@ class SessionManager:
                     time.sleep(min(_WEBHOOK_RETRY_MAX_BACKOFF, _WEBHOOK_RETRY_BASE_BACKOFF * (2 ** (attempt - 1))))
             # Do not let one permanently failing event deadlock later events.
             # Sequence numbers let the receiver reject/reconcile any late send.
-            self._advance_delivery(session_id, sequence)
-            with self._lock:
-                self._deliveries_inflight.discard(delivery_key)
-            if not success and payload.get("type") != "complete" and outbox_path:
-                try:
-                    os.unlink(outbox_path)
-                except FileNotFoundError:
-                    pass
+            try:
+                self._advance_delivery(session_id, sequence)
+                if not success and payload.get("type") != "complete" and outbox_path:
+                    try:
+                        os.unlink(outbox_path)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                with self._lock:
+                    self._deliveries_inflight.discard(delivery_key)
 
         threading.Thread(target=_send, daemon=True).start()
 
     def _outbox_loop(self) -> None:
         while True:
             time.sleep(max(1.0, _OUTBOX_RETRY_INTERVAL))
+            with self._lock:
+                pending = [
+                    (
+                        session.callback_url,
+                        {
+                            "type": "complete",
+                            "session_id": session.session_id,
+                            "result": session.callback_result,
+                            "sequence": session.callback_sequence or session.event_sequence,
+                        },
+                    )
+                    for session in self._sessions.values()
+                    if session.callback_url
+                    and session.callback_result is not None
+                    and session._callback_pending
+                    and not session._callback_sent
+                ]
+            for url, payload in pending:
+                self._fire_webhook(url, payload)
             if not os.path.isdir(self._outbox_dir):
                 continue
             for filename in sorted(os.listdir(self._outbox_dir)):
@@ -876,7 +981,7 @@ class SessionManager:
         except ValueError:
             return
         with self._lock:
-            session = self._sessions.pop(session_id, None)
+            session = self._sessions.get(session_id)
         if not session:
             return
         expected = os.path.realpath(os.path.join(self._workdir_base, session_id))
@@ -884,11 +989,21 @@ class SessionManager:
             try:
                 shutil.rmtree(expected)
             except Exception as exc:  # pylint: disable=broad-except
-                logger.warning("Failed to remove workdir", extra={"session_id": session_id, "error": str(exc)})
+                logger.error(
+                    "Session cleanup retained state because workdir removal failed",
+                    extra={"session_id": session_id, "error": str(exc)},
+                )
+                return
         try:
             os.unlink(self._state_path(session_id))
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            logger.error(
+                "Session cleanup retained ownership because state removal failed",
+                extra={"session_id": session_id, "error": str(exc)},
+            )
+            return
         if os.path.isdir(self._outbox_dir):
             prefix = f"{session_id}-"
             for filename in os.listdir(self._outbox_dir):
@@ -897,6 +1012,16 @@ class SessionManager:
                         os.unlink(os.path.join(self._outbox_dir, filename))
                     except FileNotFoundError:
                         pass
+                    except OSError as exc:
+                        logger.error(
+                            "Session cleanup retained ownership because outbox removal failed",
+                            extra={"session_id": session_id, "error": str(exc)},
+                        )
+                        return
+        with self._lock:
+            if self._sessions.get(session_id) is session:
+                self._sessions.pop(session_id, None)
+                self._workdir_owners.pop(os.path.normcase(expected), None)
 
     def _cleanup_loop(self) -> None:
         while True:

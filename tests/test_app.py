@@ -21,6 +21,16 @@ def test_execute_missing_required_fields_returns_400(client):
     assert "Missing" in r.get_json()["report"]
 
 
+def test_api_auth_is_required_by_default(client, monkeypatch):
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "_API_TOKEN", "")
+    monkeypatch.setattr(app_module, "_REQUIRE_API_AUTH", "1")
+    monkeypatch.delenv("SUBAGENT_REQUIRE_API_AUTH", raising=False)
+    response = client.post("/execute", json={"session_id": "secure", "instruction": "work"})
+    assert response.status_code == 503
+
+
 def test_execute_rejects_traversal_session_id_with_400(client):
     # The new SessionManager validation raises ValueError, which the
     # /execute handler must translate to a 400 (not 500) — otherwise
