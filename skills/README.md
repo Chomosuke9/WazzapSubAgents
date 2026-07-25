@@ -1,6 +1,6 @@
 # Skills
 
-This directory contains specialized instructions and documentation for various document manipulation and design tasks. Each subdirectory serves as a dedicated skill set for the agent.
+This directory contains specialized instructions for document, media, research, design, and external-service tasks. Each subdirectory serves as a dedicated skill set for the agent.
 
 ## Folder Overview
 
@@ -15,6 +15,9 @@ This directory contains specialized instructions and documentation for various d
 | [media-downloader](./media-downloader) | Download videos from YouTube, TikTok, Instagram, Twitter/X, and 1000+ sites using `yt-dlp`. Download Spotify tracks, playlists, and albums with metadata using `spotdl`. |
 | [image-analyzer](./image-analyzer) | Analyze image files — extract metadata (EXIF), detect dimensions/format/colors, perform OCR text extraction, compare images, and generate structured reports. Uses Pillow, pytesseract, and opencv (sparingly). |
 | [internet-researcher](./internet-researcher) | Internet research using Brave Search API — web search, image search, news search, video search, and LLM-optimized content extraction. |
+| [9router](./9router) | 9Router AI gateway for chat, image/video generation, TTS, STT, embeddings, web search, and web fetch. |
+
+The 9Router skill suite was vendored from [`decolua/9router`](https://github.com/decolua/9router) commit `79918c7830695bbca4a45c9fea4a42c3e9fd73d1` under its MIT license and adapted for this executor's local paths, dependencies, and secret handling.
 
 ## Usage
 When performing tasks related to these file formats, refer to the `SKILL.md` file within the respective folder for detailed API usage, code templates, and best practices.

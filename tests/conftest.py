@@ -1,7 +1,24 @@
+import os
 import tempfile
+from unittest.mock import MagicMock
 
 import pytest
-from unittest.mock import MagicMock
+
+# Import-time configuration validation happens while pytest collects modules,
+# before fixtures run. Safe dummy values make a clean checkout testable without
+# requiring a developer's real .env or credentials.
+os.environ["LLM_API_KEY"] = "test-api-key"
+os.environ["AGENT_MODEL"] = "test-model"
+os.environ["EXECUTOR_REQUIRE_AUTH"] = "0"
+os.environ["EXECUTOR_REQUIRE_UID_ISOLATION"] = "0"
+os.environ["EXECUTOR_PARENT_UID"] = "0"
+os.environ["SUBAGENT_REQUIRE_API_AUTH"] = "0"
+os.environ["EXECUTOR_API_TOKEN"] = ""
+os.environ["SUBAGENT_API_TOKEN"] = ""
+os.environ["SUBAGENT_WEBHOOK_TOKEN"] = ""
+os.environ["BRAVE_SEARCH_API_KEY"] = ""
+os.environ["NINEROUTER_KEY"] = ""
+os.environ["NINEROUTER_URL"] = ""
 
 
 @pytest.fixture(autouse=True)

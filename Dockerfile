@@ -88,6 +88,7 @@ RUN apt-get update && apt-get install -y \
     ghostscript \
     libreoffice \
     qpdf \
+    jq \
     fonts-liberation \
     fonts-dejavu \
     fontconfig \

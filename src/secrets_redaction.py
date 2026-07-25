@@ -37,6 +37,8 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set
 
+from src.tool_environment import TOOL_ENV_NON_SECRET, parse_tool_env_passthrough
+
 _REDACTED = "[REDACTED]"
 
 # Placeholder patterns for values that should never be redacted.
@@ -95,12 +97,12 @@ def _parse_env_key_names(path: Path) -> Set[str]:
 
 
 def _find_project_root() -> Path:
-    """Walk up from CWD to find the project root (directory with ``.git``)."""
-    cwd = Path.cwd()
-    for parent in [cwd] + list(cwd.parents):
+    """Find the project root without depending on the process CWD."""
+    module_root = Path(__file__).resolve().parent.parent
+    for parent in [module_root] + list(module_root.parents):
         if (parent / ".git").is_dir() or (parent / "pyproject.toml").is_file():
             return parent
-    return cwd
+    return module_root
 
 
 def _discover_secret_keys() -> Set[str]:
@@ -111,7 +113,14 @@ def _discover_secret_keys() -> Set[str]:
     (git-ignored) may contain additional keys added by the deployer.
     """
     root = _find_project_root()
-    keys: Set[str] = set()
+    # The env files are not present inside production containers: Compose's
+    # env_file injects values without mounting the file. Treat every configured
+    # passthrough as secret unless it is explicitly classified as public.
+    keys: Set[str] = {
+        name
+        for name in parse_tool_env_passthrough()
+        if name.upper() not in TOOL_ENV_NON_SECRET
+    }
 
     # .env.secrets.example is always present and lists the expected keys.
     example_path = root / ".env.secrets.example"
@@ -130,20 +139,25 @@ def _discover_secret_keys() -> Set[str]:
 _pattern: Optional[re.Pattern] = None
 
 
-def _build_pattern() -> Optional[re.Pattern]:
-    """Build a regex alternation of all secret values from ``os.environ``.
-
-    Only keys discovered in ``.env.secrets`` / ``.env.secrets.example`` are
-    considered.  Values that are empty or look like placeholders are skipped.
-    """
+def secret_values() -> tuple[str, ...]:
+    """Return configured non-placeholder secret values in stable order."""
     secret_keys = _discover_secret_keys()
     values: List[str] = []
+    seen: Set[str] = set()
 
     for key in sorted(secret_keys):  # sort for deterministic order
         val = os.getenv(key, "")
-        if not val or _PLACEHOLDER_RE.match(val):
+        if not val or val in seen or _PLACEHOLDER_RE.match(val):
             continue
+        seen.add(val)
         values.append(val)
+
+    return tuple(values)
+
+
+def _build_pattern() -> Optional[re.Pattern]:
+    """Build a regex alternation of all configured secret values."""
+    values = secret_values()
 
     if not values:
         return None

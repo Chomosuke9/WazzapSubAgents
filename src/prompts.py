@@ -1,7 +1,53 @@
+from __future__ import annotations
+
+import os
+import re
+from functools import lru_cache
+from pathlib import Path
+
+_SKILL_ROW_RE = re.compile(
+    r"^\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*(.*?)\s*\|$"
+)
+
+
+@lru_cache(maxsize=1)
+def load_skill_catalog() -> str:
+    """Load a concise local skill index once per service process."""
+    configured = os.getenv("SKILLS_DIR")
+    candidates = [
+        Path(configured) / "README.md" if configured else None,
+        Path(__file__).resolve().parent.parent / "skills" / "README.md",
+        Path("/skills/README.md"),
+    ]
+    for path in candidates:
+        if path is None:
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        entries: list[str] = []
+        for line in lines:
+            match = _SKILL_ROW_RE.match(line.strip())
+            if not match:
+                continue
+            name, relative_path, description = match.groups()
+            skill_dir = Path(relative_path).name
+            entries.append(
+                f"- {name}: {description} (read /skills/{skill_dir}/SKILL.md)"
+            )
+        if entries:
+            return "\n".join(entries)
+    return "- Catalog unavailable; read /skills/README.md before selecting a skill."
+
+
 EXECUTOR_SYSTEM_PROMPT = """You are an executor agent. Your job is to fulfill the user's instruction by calling the provided tools.
 
 Technical Documentation:
-- Specialized skills and documentation are available in `/skills/`. Read `/skills/README.md` first to determine which skill is relevant to your task, this is important DO NOT skip this step. If a relevant skill is found, read its `SKILL.md` file for instructions. If no specific skill exists for your task, find a way to complete it using the available tools.
+- Specialized skills and documentation are available in `/skills/`. The catalog is injected below, so do not spend a tool call rereading `/skills/README.md`. If a relevant skill is found, read its `SKILL.md` before acting. If no skill fits, complete the task using the available tools.
+
+Skill catalog:
+{skill_catalog}
 
 Tools available (call exactly one per turn — never reply with plain text, always invoke a tool):
 1. bash(reason, command) — run a bash command.
@@ -17,7 +63,7 @@ Rules:
 - Write output files anywhere inside the workdir.
 - When the instruction is fully resolved (or cannot be done), call `end_task` exactly once and stop.
 - `end_task` accepts an OPTIONAL `output_files` list. Only include paths of files that are deliverables for the user (e.g. an extracted `report.pdf`, a generated chart). Skip the argument entirely (or pass `[]`) for tasks that don't produce a file (e.g. answering a question, doing a calculation). NEVER list scratch / temp / cache / log / intermediate files — the user only wants the final deliverable, not your workspace.
-- NEVER reveal, print, echo, or include API keys, tokens, or other secrets in your output (bash stdout/stderr, python output, `end_task` reports, or any other channel). Treat values like `$BRAVE_SEARCH_API_KEY` as opaque — use them in commands via environment variable references (e.g. `curl -H "X-Subscription-Token: ${{BRAVE_SEARCH_API_KEY}}"`) but never write the raw value into a file, variable assignment that gets printed, or report text. NEVER write secrets to files, especially files you intend to include in `output_files` — a redaction layer scrubs known secret values from output files before delivery, but you must make every effort to avoid leaking them in the first place.
+- NEVER reveal, print, echo, or include API keys, tokens, or other secrets in your output (bash stdout/stderr, python output, `end_task` reports, or any other channel). Treat values like `$BRAVE_SEARCH_API_KEY` and `$NINEROUTER_KEY` as opaque — use them only through environment-variable references in request headers, but never write or print their raw values. NEVER write secrets to files, especially files you intend to include in `output_files` — a redaction layer scrubs known secret values from output files before delivery, but you must make every effort to avoid leaking them in the first place.
 - **NO heavy computation**: This container runs on a low-resource CPU-only machine with limited RAM. Heavy AI/ML computation will time out, OOM-kill the process, or freeze the container. You are STRICTLY FORBIDDEN from:
   * Installing Python packages (pip install) or Node packages (npm install). All necessary libraries are already pre-installed — work with what is available.
   * Downloading or loading any AI model (PyTorch, TensorFlow, ONNX, real-esrgan, waifu2x, GFPGAN, diffusers, transformers, or any neural network). These do not exist in the container and cannot be installed.
@@ -46,3 +92,10 @@ Steering: You may receive mid-task instructions prefixed with [STEERING INSTRUCT
 Asking the orchestrating agent: If you are blocked and genuinely cannot proceed without clarification (e.g. missing information that cannot be inferred or found), you may call end_task(success=False, report="QUESTION: <your question>"). The orchestrating agent will see your question and may re-invoke you with an answer via a steering instruction or a new task.
 
 """
+
+
+def build_executor_system_prompt(workdir: str) -> str:
+    return EXECUTOR_SYSTEM_PROMPT.format(
+        workdir=workdir,
+        skill_catalog=load_skill_catalog(),
+    )

@@ -1,21 +1,24 @@
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
+
 from dotenv import load_dotenv
 
-load_dotenv()  # .env — system config, models, and LLM_API_KEY
-load_dotenv(".env.secrets")  # .env.secrets — skill-specific secrets (supplements .env, won't override)
+from src.tool_environment import DEFAULT_TOOL_ENV_PASSTHROUGH
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")  # system config, models, and LLM_API_KEY
+load_dotenv(_PROJECT_ROOT / ".env.secrets")  # skill-specific secrets; never overrides .env
 
 # ---------------------------------------------------------------------------
-# Ensure skill-specific secret env vars always exist in os.environ.
+# Ensure optional skill env vars always exist in os.environ.
 # Some third-party libraries / code paths may access os.environ[key] directly
 # (rather than os.getenv(key, default)), which raises KeyError when unset.
 # Setting defaults here prevents that regardless of whether .env.secrets
 # exists on disk.
 # ---------------------------------------------------------------------------
-_OPTIONAL_SECRETS = [
-    "BRAVE_SEARCH_API_KEY",
-]
-for _key in _OPTIONAL_SECRETS:
+_OPTIONAL_SKILL_ENV = DEFAULT_TOOL_ENV_PASSTHROUGH
+for _key in _OPTIONAL_SKILL_ENV:
     os.environ.setdefault(_key, "")
 
 # Required vars

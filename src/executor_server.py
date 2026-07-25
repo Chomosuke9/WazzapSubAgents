@@ -2,7 +2,6 @@ import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
 import re
 import signal
 import subprocess
@@ -12,11 +11,13 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 from typing import Callable
 
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 
 from src.logger import get_logger
+from src.tool_environment import TOOL_ENV_BLOCKLIST, parse_tool_env_passthrough
 
 logger = get_logger("executor-server")
 
@@ -45,16 +46,7 @@ TOOL_ENV_ALLOWLIST = {
     "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "PATHEXT", "WINDIR",
 }
 TOOL_ENV_PASSTHROUGH = {
-    name.strip()
-    for name in os.getenv(
-        "EXECUTOR_TOOL_ENV_PASSTHROUGH", "BRAVE_SEARCH_API_KEY"
-    ).split(",")
-    if name.strip()
-}
-TOOL_ENV_BLOCKLIST = {
-    "EXECUTOR_API_TOKEN",
-    "LLM_API_KEY",
-    "SUBAGENT_WEBHOOK_TOKEN",
+    name.upper() for name in parse_tool_env_passthrough()
 }
 
 
@@ -284,8 +276,8 @@ def create_executor_app() -> Flask:
             key: value
             for key, value in os.environ.items()
             if (
-                key in TOOL_ENV_ALLOWLIST or key in TOOL_ENV_PASSTHROUGH
-            ) and key not in TOOL_ENV_BLOCKLIST
+                key in TOOL_ENV_ALLOWLIST or key.upper() in TOOL_ENV_PASSTHROUGH
+            ) and key.upper() not in TOOL_ENV_BLOCKLIST
         }
         tool_env.update({
             "HOME": workdir,

@@ -82,6 +82,37 @@ class TestContainerRunning:
         assert dm.container_uses_current_image() is True
 
 
+class TestStartContainer:
+    def test_forwards_only_allowed_skill_env_and_host_gateway(
+        self, mock_docker_client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+        monkeypatch.setenv(
+            "EXECUTOR_TOOL_ENV_PASSTHROUGH",
+            "CUSTOM_SKILL_KEY,llm_api_key,EXECUTOR_BIND_HOST,NINEROUTER_KEY",
+        )
+        monkeypatch.setenv("CUSTOM_SKILL_KEY", "custom-value")
+        monkeypatch.setenv("LLM_API_KEY", "must-not-leak")
+        monkeypatch.setenv("EXECUTOR_BIND_HOST", "attacker-controlled")
+        monkeypatch.setenv("NINEROUTER_KEY", "nine-value")
+
+        dm = DockerManager()
+        dm.start_container()
+
+        kwargs = mock_docker_client.containers.run.call_args.kwargs
+        environment = kwargs["environment"]
+        assert environment["CUSTOM_SKILL_KEY"] == "custom-value"
+        assert environment["NINEROUTER_KEY"] == "nine-value"
+        assert "llm_api_key" not in environment
+        assert environment["EXECUTOR_BIND_HOST"] == "0.0.0.0"
+        assert environment["EXECUTOR_TOOL_ENV_PASSTHROUGH"] == (
+            "CUSTOM_SKILL_KEY,NINEROUTER_KEY"
+        )
+        assert kwargs["extra_hosts"] == {
+            "host.docker.internal": "host-gateway"
+        }
+
+
 class TestBuildImage:
     @patch("src.docker_manager.subprocess.run")
     def test_build_image_success(self, mock_run, mock_docker_client):

@@ -60,11 +60,15 @@ services:
       EXECUTOR_PARENT_UID: "0"
       EXECUTOR_API_TOKEN: ${EXECUTOR_API_TOKEN:?set EXECUTOR_API_TOKEN in .env}
       EXECUTOR_REQUIRE_AUTH: "1"
-      # Only skill-specific keys are exposed to arbitrary tool execution.
-      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+      EXECUTOR_TOOL_ENV_PASSTHROUGH: ${EXECUTOR_TOOL_ENV_PASSTHROUGH:-BRAVE_SEARCH_API_KEY,NINEROUTER_URL,NINEROUTER_KEY}
+      # Non-secret skill config comes from .env. Skill API keys come directly
+      # from env_file above; declaring them here would override those values.
+      NINEROUTER_URL: ${NINEROUTER_URL:-}
     volumes:
       - ${SUBAGENT_HOST_STORAGE_DIR:-/storage}/subagent_work:/storage/subagent_work:rw
       - ./skills:/skills:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - executor-net
     restart: unless-stopped

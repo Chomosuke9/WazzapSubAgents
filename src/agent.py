@@ -3,16 +3,22 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.messages import messages_to_dict, messages_from_dict
 
 from src.config import config
 from src.container_client import ContainerClient
 from src.logger import get_logger
+from src.prompts import build_executor_system_prompt
+from src.secrets_redaction import redact_secrets, secret_values
 from src.session_manager import SessionManager
-from src.prompts import EXECUTOR_SYSTEM_PROMPT
-from src.secrets_redaction import redact_secrets
 
 logger = get_logger(__name__)
 
@@ -25,6 +31,32 @@ STUCK_LOOP_THRESHOLD = int(os.getenv("AGENT_STUCK_LOOP_THRESHOLD", "5"))
 # How many times to re-invoke the LLM at the same turn when it returns plain
 # text (no native tool_call). Prevents infinite loops on a misconfigured model.
 NO_TOOL_RETRY_MAX = int(os.getenv("AGENT_NO_TOOL_RETRY_MAX", "3"))
+TOOL_RESULT_MAX_CHARS = max(
+    4096, int(os.getenv("AGENT_TOOL_RESULT_MAX_CHARS", "120000"))
+)
+
+
+def _truncate_tool_result(value: str) -> str:
+    """Bound tool history while retaining useful diagnostics at both ends."""
+    if len(value) <= TOOL_RESULT_MAX_CHARS:
+        return value
+    available = TOOL_RESULT_MAX_CHARS
+    marker = ""
+    for _ in range(3):
+        omitted = len(value) - available
+        marker = (
+            "\n... [tool output truncated: "
+            f"{omitted:,} characters omitted] ...\n"
+        )
+        available = TOOL_RESULT_MAX_CHARS - len(marker)
+    head = max(1, (available * 3) // 4)
+    tail = max(1, available - head)
+    return value[:head] + marker + value[-tail:]
+
+
+def _prepare_tool_result(value: str) -> str:
+    """Redact the complete value before truncation can split a secret."""
+    return _truncate_tool_result(redact_secrets(value))
 
 
 # Tool schemas — passed to ``ChatOpenAI.bind_tools`` so the model emits
@@ -254,14 +286,14 @@ class ExecutorAgent:
             },
         )
         if "error" in result:
-            return (
+            return _prepare_tool_result(
                 f"ERROR:\n{result['error']}"
                 f"\nSTDOUT:\n{result.get('stdout', '')}"
                 f"\nSTDERR:\n{result.get('stderr', '')}"
                 f"\nRETURNCODE: {result.get('returncode')}"
             )
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
-        return output
+        return _prepare_tool_result(output)
 
     def _python_tool(self, reason: str, code: str, session_id: str, timeout: int = 10) -> str:
         self.session_manager.append_progress(session_id, {
@@ -281,14 +313,14 @@ class ExecutorAgent:
             },
         )
         if "error" in result:
-            return (
+            return _prepare_tool_result(
                 f"ERROR:\n{result['error']}"
                 f"\nSTDOUT:\n{result.get('stdout', '')}"
                 f"\nSTDERR:\n{result.get('stderr', '')}"
                 f"\nRETURNCODE: {result.get('returncode')}"
             )
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
-        return output
+        return _prepare_tool_result(output)
 
     def _javascript_tool(self, reason: str, code: str, session_id: str, timeout: int = 10) -> str:
         self.session_manager.append_progress(session_id, {
@@ -307,41 +339,78 @@ class ExecutorAgent:
             },
         )
         if "error" in result:
-            return (
+            return _prepare_tool_result(
                 f"ERROR:\n{result['error']}"
                 f"\nSTDOUT:\n{result.get('stdout', '')}"
                 f"\nSTDERR:\n{result.get('stderr', '')}"
                 f"\nRETURNCODE: {result.get('returncode')}"
             )
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
-        return output
+        return _prepare_tool_result(output)
 
     @staticmethod
-    def _redact_secrets_in_files(file_paths: List[str], session_id: str) -> None:
+    def _redact_secrets_in_files(file_paths: List[str], session_id: str) -> set[str]:
         """Scan output files for known secret values and overwrite with
-        redacted content. Binary files and very large files are skipped
-        silently. Only overwrites when a secret was actually found."""
-        # 1 MB cap — skip very large files to avoid memory issues
+        redacted content. Large or binary files containing a secret are
+        rejected instead of risking corruption or leakage."""
         MAX_FILE_SIZE = 1 * 1024 * 1024
+        encoded_secrets = [value.encode("utf-8") for value in secret_values()]
+        blocked: set[str] = set()
+
+        if not encoded_secrets:
+            return blocked
 
         for path in file_paths:
             try:
-                if os.path.getsize(path) > MAX_FILE_SIZE:
+                size = os.path.getsize(path)
+                if size > MAX_FILE_SIZE:
+                    max_secret_size = max(map(len, encoded_secrets))
+                    overlap = b""
+                    found = False
+                    with open(path, "rb") as file_handle:
+                        while chunk := file_handle.read(64 * 1024):
+                            window = overlap + chunk
+                            if any(secret in window for secret in encoded_secrets):
+                                found = True
+                                break
+                            overlap_size = max_secret_size - 1
+                            overlap = window[-overlap_size:] if overlap_size else b""
+                    if found:
+                        blocked.add(path)
                     continue
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            except (OSError, UnicodeDecodeError):
-                # Binary file or unreadable — skip
+                with open(path, "rb") as file_handle:
+                    raw_content = file_handle.read()
+            except OSError:
+                blocked.add(path)
                 continue
 
+            if not any(secret in raw_content for secret in encoded_secrets):
+                continue
+            try:
+                content = raw_content.decode("utf-8")
+            except UnicodeDecodeError:
+                blocked.add(path)
+                continue
             redacted = redact_secrets(content)
-            if redacted != content:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(redacted)
-                logger.warning(
-                    "Redacted secrets from output file",
-                    extra={"session_id": session_id, "file": path},
-                )
+            if any(secret in redacted.encode("utf-8") for secret in encoded_secrets):
+                blocked.add(path)
+                continue
+            try:
+                with open(path, "w", encoding="utf-8") as file_handle:
+                    file_handle.write(redacted)
+            except OSError:
+                blocked.add(path)
+                continue
+            logger.warning(
+                "Redacted secrets from output file",
+                extra={"session_id": session_id, "file": path},
+            )
+        if blocked:
+            logger.error(
+                "Blocked output files containing secrets that could not be safely redacted",
+                extra={"session_id": session_id, "files": sorted(blocked)},
+            )
+        return blocked
 
     def _end_task_tool(
         self,
@@ -495,12 +564,14 @@ class ExecutorAgent:
         #   echo $BRAVE_SEARCH_API_KEY > api_key.txt
         # and then list that file as an output_file. We strip known secret
         # values from text files before they reach the user.
-        self._redact_secrets_in_files(accepted, session_id=session_id)
+        blocked = self._redact_secrets_in_files(accepted, session_id=session_id)
+        if blocked:
+            accepted = [path for path in accepted if path not in blocked]
 
         return accepted
 
     def _build_system_prompt(self, workdir: str) -> str:
-        return EXECUTOR_SYSTEM_PROMPT.format(workdir=workdir)
+        return build_executor_system_prompt(workdir)
 
     # ------------------------------------------------------------------
     # Tool-call extraction
@@ -1035,7 +1106,7 @@ class ExecutorAgent:
                     )
 
                 messages.append(ToolMessage(
-                    content=redact_secrets(str(result)),
+                    content=_prepare_tool_result(str(result)),
                     tool_call_id=tc_id,
                     name=tool_name,
                 ))

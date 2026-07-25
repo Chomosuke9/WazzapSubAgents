@@ -185,6 +185,7 @@ make what's already here more of a piece of art?"*
 This is often the difference between an acceptable design and a museum-quality
 one.
 
+Last, since you can't see the images directly, read `/skills/9router/SKILL.md` to use other llm to analyze image directly. For example, you can preview the images you just make with it.
 ---
 
 ## Multi-page option

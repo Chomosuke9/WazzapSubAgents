@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import src.agent as agent_module
 from src.agent import ExecutorAgent
 
 
@@ -43,6 +44,48 @@ def test_bash_tool_handles_error_key(_mock_llm_class):
     # Even error-only results include STDOUT/STDERR/RETURNCODE sections
     assert "STDOUT:" in result
     assert "STDERR:" in result
+
+
+@patch("src.agent.ChatOpenAI")
+def test_tool_output_is_bounded_with_head_and_tail(_mock_llm_class, monkeypatch):
+    monkeypatch.setattr(agent_module, "TOOL_RESULT_MAX_CHARS", 4096)
+    client = MagicMock()
+    sm = MagicMock()
+    client.run_bash.return_value = {
+        "stdout": "HEAD" + ("x" * 10000),
+        "stderr": "TAIL-DIAGNOSTIC",
+        "returncode": 7,
+    }
+
+    result = ExecutorAgent(client, sm)._bash_tool("large output", "cmd", "s1")
+
+    assert len(result) == 4096
+    assert result.startswith("STDOUT:\nHEAD")
+    assert "tool output truncated" in result
+    assert "TAIL-DIAGNOSTIC" in result
+    assert result.endswith("RETURNCODE: 7")
+
+
+@patch("src.agent.ChatOpenAI")
+def test_tool_output_is_redacted_before_truncation(_mock_llm_class, monkeypatch):
+    from src import secrets_redaction
+
+    secret = "nine-secret-crossing-boundary"
+    monkeypatch.setenv("NINEROUTER_KEY", secret)
+    monkeypatch.setattr(agent_module, "TOOL_RESULT_MAX_CHARS", 4096)
+    secrets_redaction.rebuild()
+    client = MagicMock()
+    client.run_bash.return_value = {
+        "stdout": ("x" * 3060) + secret + ("y" * 4000),
+        "stderr": "",
+        "returncode": 0,
+    }
+
+    result = ExecutorAgent(client, MagicMock())._bash_tool("secret", "cmd", "s1")
+
+    assert secret not in result
+    assert "tool output truncated" in result
+    secrets_redaction._pattern = None
 
 
 @patch("src.agent.ChatOpenAI")

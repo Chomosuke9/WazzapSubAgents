@@ -354,6 +354,34 @@ def test_resolve_declared_output_files_returns_empty_for_empty_input(tmp_path):
     assert agent._resolve_declared_output_files(str(workdir), [], session_id="s1") == []
 
 
+def test_output_files_redact_text_and_reject_unsafe_secret_files(
+    tmp_path, monkeypatch
+):
+    from src import secrets_redaction
+
+    secret = "nine-secret-output-value"
+    monkeypatch.setenv("NINEROUTER_KEY", secret)
+    secrets_redaction.rebuild()
+    workdir = tmp_path / "secret-outputs"
+    workdir.mkdir()
+    text_file = workdir / "safe.txt"
+    text_file.write_text(f"token={secret}", encoding="utf-8")
+    binary_file = workdir / "unsafe.bin"
+    binary_file.write_bytes(b"\xff\xfe" + secret.encode())
+    large_file = workdir / "large.log"
+    large_file.write_bytes((b"x" * (1024 * 1024 + 16)) + secret.encode())
+
+    accepted = _make_resolver_agent()._resolve_declared_output_files(
+        str(workdir),
+        [str(text_file), str(binary_file), str(large_file)],
+        session_id="secret-output",
+    )
+
+    assert accepted == [str(text_file.resolve())]
+    assert text_file.read_text(encoding="utf-8") == "token=[REDACTED]"
+    secrets_redaction._pattern = None
+
+
 def test_end_task_dispatch_normalizes_output_files():
     """The ``end_task`` dispatch path must normalise weird inputs (None,
     non-list, non-string entries) into a clean list-of-strings rather

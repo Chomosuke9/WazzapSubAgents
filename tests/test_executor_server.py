@@ -1,7 +1,7 @@
 import hashlib
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -248,22 +248,55 @@ def test_executor_stops_and_reports_excessive_output(client, monkeypatch):
     assert "output exceeded" in response.get_json()["error"].lower()
 
 
+def test_executor_exposes_only_allowlisted_skill_environment(client, monkeypatch):
+    client_, base = client
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-test-value")
+    monkeypatch.setenv("NINEROUTER_URL", "https://router.example.test")
+    monkeypatch.setenv("NINEROUTER_KEY", "nine-test-value")
+    monkeypatch.setenv("UNLISTED_SECRET", "must-not-leak")
+    monkeypatch.setenv("LLM_API_KEY", "service-secret")
+
+    with patch(
+        "src.executor_server._run_bounded",
+        return_value=("ok\n", "", 0, None),
+    ) as run:
+        response = client_.post(
+            "/bash",
+            json={"command": "true", "session_id": "env-boundary"},
+        )
+
+    assert response.status_code == 200
+    environment = run.call_args.kwargs["isolation"]["env"]
+    assert environment["BRAVE_SEARCH_API_KEY"] == "brave-test-value"
+    assert environment["NINEROUTER_URL"] == "https://router.example.test"
+    assert environment["NINEROUTER_KEY"] == "nine-test-value"
+    assert "UNLISTED_SECRET" not in environment
+    assert "LLM_API_KEY" not in environment
+    assert environment["HOME"] == os.path.join(base, "env-boundary")
+    assert environment["TMPDIR"] == os.path.join(base, "env-boundary", ".tmp")
+
+
 @pytest.mark.skipif(
     os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() != 0,
     reason="Unix UID isolation requires a root test runner",
 )
-def test_sibling_sessions_run_as_distinct_uids(client):
+def test_sibling_sessions_run_as_distinct_uids(client, monkeypatch):
+    import src.executor_server as executor_module
+
+    monkeypatch.setattr(executor_module, "REQUIRE_UID_ISOLATION", True)
     client_, _ = client
-    completed = MagicMock(stdout="ok\n", stderr="", returncode=0)
-    with patch("src.executor_server.subprocess.run", return_value=completed) as run:
+    with patch(
+        "src.executor_server._run_bounded",
+        return_value=("ok\n", "", 0, None),
+    ) as run:
         first = client_.post("/bash", json={"command": "true", "session_id": "uid-a"})
         second = client_.post("/bash", json={"command": "true", "session_id": "uid-b"})
 
     assert first.status_code == second.status_code == 200
-    first_uid = run.call_args_list[0].kwargs["user"]
-    second_uid = run.call_args_list[1].kwargs["user"]
+    first_uid = run.call_args_list[0].kwargs["isolation"]["user"]
+    second_uid = run.call_args_list[1].kwargs["isolation"]["user"]
     assert first_uid != second_uid
-    assert run.call_args_list[0].kwargs["umask"] == 0o077
+    assert run.call_args_list[0].kwargs["isolation"]["umask"] == 0o077
 
 
 # --- _clamp_timeout tests ---

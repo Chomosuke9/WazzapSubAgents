@@ -14,6 +14,9 @@ This skill analyzes images using lightweight, CPU-efficient tools. It produces
 no AI models, no upscaling, no heavy computation.
 
 ---
+# Pro Tips
+Since you can't see the images directly, read `/skills/9router/SKILL.md` to use other llm to analyze image directly. For example, you can preview the images you need to analyze with that.
+---
 
 ## Quick Reference
 
