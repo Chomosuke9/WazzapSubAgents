@@ -24,7 +24,7 @@ services:
       SUBAGENT_API_TOKEN: ${SUBAGENT_API_TOKEN:?set SUBAGENT_API_TOKEN in .env}
       SUBAGENT_REQUIRE_API_AUTH: "1"
       SUBAGENT_WEBHOOK_TOKEN: ${SUBAGENT_WEBHOOK_TOKEN:?set SUBAGENT_WEBHOOK_TOKEN in .env}
-      SESSION_IDLE_TIMEOUT: ${SESSION_IDLE_TIMEOUT:-600}
+      SESSION_IDLE_TIMEOUT: ${SESSION_IDLE_TIMEOUT:-7200}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       WORKDIR_BASE: /storage/subagent_work
     volumes:
@@ -40,8 +40,8 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
-      timeout: 5s
-      retries: 3
+      timeout: 10s
+      retries: 5
 
   executor-executor:
     image: executor-service:v1.0.0
@@ -75,8 +75,8 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
       interval: 30s
-      timeout: 5s
-      retries: 3
+      timeout: 10s
+      retries: 5
 
 networks:
   executor-net:

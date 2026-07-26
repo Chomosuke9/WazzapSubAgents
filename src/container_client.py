@@ -18,8 +18,8 @@ class ContainerClient:
     def __init__(
         self,
         base_url: str,
-        timeout: int = 300,
-        max_retries: int = 3,
+        timeout: int = 900,
+        max_retries: int = 5,
         docker_mgr: Optional["DockerManager"] = None,
         http_timeout_grace: Optional[float] = None,
         api_token: Optional[str] = None,
@@ -29,7 +29,7 @@ class ContainerClient:
         self.max_retries = max_retries
         self.docker_mgr = docker_mgr
         self.http_timeout_grace = (
-            float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "5"))
+            float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "15"))
             if http_timeout_grace is None else float(http_timeout_grace)
         )
         if self.http_timeout_grace < 1:
@@ -59,12 +59,12 @@ class ContainerClient:
                 logger.warning("Container unreachable, attempting restart...")
                 if not self.docker_mgr.container_running():
                     self.docker_mgr.start_container()
-                    self.docker_mgr.wait_for_container_ready(timeout=30)
+                    self.docker_mgr.wait_for_container_ready(timeout=60)
                     logger.info("Container restarted successfully")
                 else:
                     # Container exists but may be unresponsive — just wait.
                     logger.info("Container still running, waiting for health...")
-                    self.docker_mgr.wait_for_container_ready(timeout=15)
+                    self.docker_mgr.wait_for_container_ready(timeout=30)
             except Exception as exc:
                 logger.error("Container restart failed", extra={"error": str(exc)})
 
@@ -143,7 +143,7 @@ class ContainerClient:
 
     def health_check(self) -> bool:
         try:
-            resp = requests.get(f"{self.base_url}/health", timeout=5)
+            resp = requests.get(f"{self.base_url}/health", timeout=15)
             return resp.status_code == 200
         except Exception:
             return False

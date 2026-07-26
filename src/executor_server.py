@@ -23,7 +23,8 @@ logger = get_logger("executor-server")
 
 # Execution timeout upper bound — prevents a single request from holding a
 # Flask thread for an unbounded amount of time.
-MAX_TIMEOUT = 600  # 10 minutes
+MAX_TIMEOUT = 1800  # 30 minutes
+DEFAULT_EXECUTION_TIMEOUT = 60
 MAX_REQUEST_BYTES = int(os.getenv("EXECUTOR_MAX_REQUEST_BYTES", str(2 * 1024 * 1024)))
 MAX_CACHED_RESULTS = int(os.getenv("EXECUTOR_MAX_CACHED_RESULTS", "1000"))
 MAX_OUTPUT_BYTES = int(os.getenv("EXECUTOR_MAX_OUTPUT_BYTES", str(4 * 1024 * 1024)))
@@ -50,7 +51,7 @@ TOOL_ENV_PASSTHROUGH = {
 }
 
 
-def _clamp_timeout(timeout, default: int = 10) -> int | float:
+def _clamp_timeout(timeout, default: int = DEFAULT_EXECUTION_TIMEOUT) -> int | float:
     """Validate and clamp an execution timeout.
 
     Falls back to *default* when the value is missing, non-numeric,
@@ -434,7 +435,7 @@ def create_executor_app() -> Flask:
         request_id = data.get("request_id") or uuid.uuid4().hex
         if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
             return None, {"error": "request_id must be 16-128 URL-safe characters"}, 400
-        timeout = _clamp_timeout(data.get("timeout", 10))
+        timeout = _clamp_timeout(data.get("timeout", DEFAULT_EXECUTION_TIMEOUT))
         return data, workdir, request_id, timeout
 
     def _execute_idempotently(

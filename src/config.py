@@ -37,7 +37,7 @@ AGENT_MODEL_HIGH = os.getenv("AGENT_MODEL_HIGH") or AGENT_MODEL_LOW
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")  # e.g. https://api.anthropic.com or custom proxy
 AGENT_TEMPERATURE_LOW = float(os.getenv("AGENT_TEMPERATURE_LOW", os.getenv("AGENT_TEMPERATURE", "0.7")))
 AGENT_TEMPERATURE_HIGH = float(os.getenv("AGENT_TEMPERATURE_HIGH", "0.3"))
-SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "600"))
+SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "7200"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
 CONTAINER_EXECUTOR_URL = os.getenv("CONTAINER_EXECUTOR_URL", "http://localhost:5001")
@@ -49,7 +49,7 @@ if EXECUTOR_MANAGEMENT_MODE not in {"auto", "managed", "external"}:
     raise ValueError(
         "EXECUTOR_MANAGEMENT_MODE must be one of: auto, managed, external"
     )
-EXECUTOR_HTTP_TIMEOUT_GRACE = float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "5"))
+EXECUTOR_HTTP_TIMEOUT_GRACE = float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "15"))
 if EXECUTOR_HTTP_TIMEOUT_GRACE < 1:
     raise ValueError("EXECUTOR_HTTP_TIMEOUT_GRACE must be at least 1 second")
 EXECUTOR_API_TOKEN = os.getenv("EXECUTOR_API_TOKEN", "").strip()
@@ -62,11 +62,11 @@ if EXECUTOR_REQUIRE_AUTH and not EXECUTOR_API_TOKEN:
 # WazzapAgents webhook is always-on (auto-restarts on crash). These
 # tunables control how aggressively we retry delivery and verify the
 # endpoint before submitting a task. See session_manager.py for usage.
-WEBHOOK_RETRY_MAX = int(os.getenv("WEBHOOK_RETRY_MAX", "10"))
-WEBHOOK_RETRY_BASE_BACKOFF = float(os.getenv("WEBHOOK_RETRY_BASE_BACKOFF", "0.5"))
-WEBHOOK_RETRY_MAX_BACKOFF = float(os.getenv("WEBHOOK_RETRY_MAX_BACKOFF", "30.0"))
-WEBHOOK_HEALTH_CHECK_ATTEMPTS = int(os.getenv("WEBHOOK_HEALTH_CHECK_ATTEMPTS", "3"))
-WEBHOOK_HEALTH_CHECK_TIMEOUT = float(os.getenv("WEBHOOK_HEALTH_CHECK_TIMEOUT", "5.0"))
+WEBHOOK_RETRY_MAX = int(os.getenv("WEBHOOK_RETRY_MAX", "15"))
+WEBHOOK_RETRY_BASE_BACKOFF = float(os.getenv("WEBHOOK_RETRY_BASE_BACKOFF", "1.0"))
+WEBHOOK_RETRY_MAX_BACKOFF = float(os.getenv("WEBHOOK_RETRY_MAX_BACKOFF", "60.0"))
+WEBHOOK_HEALTH_CHECK_ATTEMPTS = int(os.getenv("WEBHOOK_HEALTH_CHECK_ATTEMPTS", "5"))
+WEBHOOK_HEALTH_CHECK_TIMEOUT = float(os.getenv("WEBHOOK_HEALTH_CHECK_TIMEOUT", "15.0"))
 
 config = {
     "llm_api_key": LLM_API_KEY,

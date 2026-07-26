@@ -52,7 +52,7 @@ def test_run_bash_passes_timeout():
         assert result["returncode"] == 0
         call_args = mock_post.call_args
         assert call_args.kwargs["json"]["timeout"] == 3
-        assert call_args.kwargs["timeout"] == 8
+        assert call_args.kwargs["timeout"] == 18
 
 
 def test_run_python_passes_timeout():
@@ -61,7 +61,7 @@ def test_run_python_passes_timeout():
         client.run_python("print('ok')", timeout=7)
         call_args = mock_post.call_args
         assert call_args.kwargs["json"]["timeout"] == 7
-        assert call_args.kwargs["timeout"] == 12
+        assert call_args.kwargs["timeout"] == 22
 
 
 def test_retry_reuses_idempotency_key():

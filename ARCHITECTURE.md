@@ -112,7 +112,7 @@ When the agent loop finishes:
 7. The result is also readable at `GET /sessions/<session_id>/result`.
 
 Sessions that have been `completed` and idle for more than
-`SESSION_IDLE_TIMEOUT` seconds (default 600) are cleaned up by a background
+`SESSION_IDLE_TIMEOUT` seconds (default 7200) are cleaned up by a background
 thread (`SessionManager._cleanup_loop()` in `src/session_manager.py`) — the workdir is deleted with
 `shutil.rmtree`.
 
@@ -358,7 +358,7 @@ events so the bridge can tell the user "you're #3 in line".
 ### Webhook reliability
 
 `SessionManager._fire_webhook` retries with exponential backoff up to
-`WEBHOOK_RETRY_MAX` (default 5) times, capped at `WEBHOOK_RETRY_MAX_BACKOFF`
+`WEBHOOK_RETRY_MAX` (default 15) times, capped at `WEBHOOK_RETRY_MAX_BACKOFF`
 seconds. All webhooks are fired on a daemon thread so the agent loop never
 blocks on the bridge.
 
@@ -374,7 +374,7 @@ Tunables (all env-overridable):
 
 ### Session cleanup
 
-Completed sessions older than `SESSION_IDLE_TIMEOUT` (default 600 s) are
+Completed sessions older than `SESSION_IDLE_TIMEOUT` (default 7200 s) are
 deleted every 10 s by a daemon thread. The workdir is `rmtree`'d on cleanup —
 **outputs must be collected by the bridge before then** (the `complete`
 webhook is fired as soon as the result is stored, so this is a
@@ -429,14 +429,14 @@ System config (including `LLM_API_KEY` and `NINEROUTER_URL`) lives in `.env`. Sk
 | `FLASK_PORT`                  | `5000` (main) / `5001` (sidecar) | HTTP listen port |
 | `CONTAINER_EXECUTOR_URL`      | `http://localhost:5001`        | Main service → sidecar URL |
 | `EXECUTOR_MANAGEMENT_MODE`    | `auto`                         | `managed`, `external`, or host-aware `auto` |
-| `EXECUTOR_HTTP_TIMEOUT_GRACE` | `5`                            | HTTP response grace after tool timeout |
+| `EXECUTOR_HTTP_TIMEOUT_GRACE` | `15`                           | HTTP response grace after tool timeout |
 | `EXECUTOR_API_TOKEN`          | unset                          | Bearer credential for main → executor tool calls |
 | `EXECUTOR_REQUIRE_AUTH`       | `0` (`1` in Compose)           | Fail closed when the token is absent |
 | `EXECUTOR_REQUIRE_UID_ISOLATION` | `1`                         | Fail closed without per-session Unix UID isolation |
 | `EXECUTOR_PARENT_UID`          | `0`                            | Parent UID granted ACL access to session workdirs |
 | `WORKDIR_BASE`                | `/storage/subagent_work`       | Per-session workdir root (must be shared-mounted) |
 | `SUBAGENT_STORAGE_DIR`        | `/storage`                     | Host path of the `/storage` bind mount |
-| `SESSION_IDLE_TIMEOUT`        | `600`                          | Seconds before a completed session's workdir is deleted |
+| `SESSION_IDLE_TIMEOUT`        | `7200`                         | Seconds before a completed session's workdir is deleted |
 | `SUBAGENT_GLOBAL_LIMIT`       | `1`                            | Max concurrent agent executions |
 | `AGENT_LLM_RETRY_MAX`         | `5`                            | LLM call retry budget |
 | `AGENT_STUCK_LOOP_THRESHOLD`  | `5`                            | Max identical tool calls before aborting |
@@ -444,7 +444,7 @@ System config (including `LLM_API_KEY` and `NINEROUTER_URL`) lives in `.env`. Sk
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `120000`                       | Head/tail limit for tool output retained in LLM history |
 | `EXECUTOR_TOOL_ENV_PASSTHROUGH` | Brave + 9Router defaults     | Validated skill env names exposed to generated tools |
 | `NINEROUTER_URL`              | unset                          | Reachable 9Router base URL |
-| `WEBHOOK_RETRY_MAX`           | `5`                            | Webhook delivery retry budget |
+| `WEBHOOK_RETRY_MAX`           | `15`                           | Webhook delivery retry budget |
 | `LOG_LEVEL`                   | `INFO`                         | Python logging level |
 
 ### Secrets (`.env.secrets`)

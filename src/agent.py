@@ -86,7 +86,7 @@ BASH_TOOL_SCHEMA: Dict[str, Any] = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Maximum time in seconds to wait for the command to finish. Default is 10.",
+                    "description": "Maximum time in seconds to wait for the command to finish. Default is 60.",
                     "default": 10,
                 },
             },
@@ -118,7 +118,7 @@ PYTHON_TOOL_SCHEMA: Dict[str, Any] = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Maximum time in seconds to wait for the code to finish. Default is 10.",
+                    "description": "Maximum time in seconds to wait for the code to finish. Default is 60.",
                     "default": 10,
                 },
             },
@@ -189,7 +189,7 @@ JAVASCRIPT_TOOL_SCHEMA: Dict[str, Any] = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Maximum time in seconds to wait for the code to finish. Default is 10.",
+                    "description": "Maximum time in seconds to wait for the code to finish. Default is 60.",
                     "default": 10,
                 },
             },
@@ -268,7 +268,7 @@ class ExecutorAgent:
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
-    def _bash_tool(self, reason: str, command: str, session_id: str, timeout: int = 10) -> str:
+    def _bash_tool(self, reason: str, command: str, session_id: str, timeout: int = 60) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "bash",
             "reason": (reason or "")[:500],
@@ -295,7 +295,7 @@ class ExecutorAgent:
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return _prepare_tool_result(output)
 
-    def _python_tool(self, reason: str, code: str, session_id: str, timeout: int = 10) -> str:
+    def _python_tool(self, reason: str, code: str, session_id: str, timeout: int = 60) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "python",
             "reason": (reason or "")[:500],
@@ -322,7 +322,7 @@ class ExecutorAgent:
         output = f"STDOUT:\n{result.get('stdout', '')}\nSTDERR:\n{result.get('stderr', '')}\nRETURNCODE: {result.get('returncode')}"
         return _prepare_tool_result(output)
 
-    def _javascript_tool(self, reason: str, code: str, session_id: str, timeout: int = 10) -> str:
+    def _javascript_tool(self, reason: str, code: str, session_id: str, timeout: int = 60) -> str:
         self.session_manager.append_progress(session_id, {
             "step": "javascript",
             "reason": (reason or "")[:500],
@@ -441,21 +441,21 @@ class ExecutorAgent:
                 reason=arguments.get("reason", ""),
                 command=arguments.get("command", ""),
                 session_id=session_id,
-                timeout=arguments.get("timeout", 10),
+                timeout=arguments.get("timeout", 60),
             )
         if tool_name == "python":
             return self._python_tool(
                 reason=arguments.get("reason", ""),
                 code=arguments.get("code", ""),
                 session_id=session_id,
-                timeout=arguments.get("timeout", 10),
+                timeout=arguments.get("timeout", 60),
             )
         if tool_name == "javascript":
             return self._javascript_tool(
                 reason=arguments.get("reason", ""),
                 code=arguments.get("code", ""),
                 session_id=session_id,
-                timeout=arguments.get("timeout", 10),
+                timeout=arguments.get("timeout", 60),
             )
         if tool_name == "end_task":
             raw_output_files = arguments.get("output_files")
@@ -783,14 +783,30 @@ class ExecutorAgent:
         contains no native ``tool_calls``.
 
         We deliberately do NOT append the bad ``AIMessage`` to ``messages``
-        between retries — the goal is to give the model a fresh attempt
-        from the exact same point rather than letting it see (and double
-        down on) its own earlier non-tool reply.
+        between retries. Instead, each retry receives a temporary system
+        correction explaining that the previous response was invalid and
+        requiring exactly one native tool call. The correction is not stored
+        in the session history after this turn succeeds or fails.
         """
         attempts = max(1, NO_TOOL_RETRY_MAX + 1)
         last_response: Any = None
         for attempt in range(1, attempts + 1):
-            response = self._invoke_llm_with_retry(messages, session_id=session_id, llm=llm)
+            invoke_messages = messages
+            if attempt > 1:
+                retry_number = attempt - 1
+                urgency = "FINAL RETRY. " if retry_number == NO_TOOL_RETRY_MAX else ""
+                correction = SystemMessage(content=(
+                    f"[TOOL CALL REQUIRED - retry {retry_number}/{NO_TOOL_RETRY_MAX}] "
+                    f"{urgency}Your previous response was invalid because it did not "
+                    "contain a native tool call. Do not reply with plain text. "
+                    "Call exactly one available tool now: bash, python, javascript, "
+                    "or end_task. If the work is complete or cannot continue, call "
+                    "end_task with an accurate success value and report."
+                ))
+                invoke_messages = [*messages, correction]
+            response = self._invoke_llm_with_retry(
+                invoke_messages, session_id=session_id, llm=llm,
+            )
             tool_calls = self._normalize_tool_calls(response)
             last_response = response
             if tool_calls:

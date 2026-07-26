@@ -302,14 +302,14 @@ def test_sibling_sessions_run_as_distinct_uids(client, monkeypatch):
 # --- _clamp_timeout tests ---
 
 def test_clamp_timeout_defaults_on_missing():
-    assert _clamp_timeout(None) == 10
-    assert _clamp_timeout(0) == 10
-    assert _clamp_timeout(-5) == 10
+    assert _clamp_timeout(None) == 60
+    assert _clamp_timeout(0) == 60
+    assert _clamp_timeout(-5) == 60
 
 
 def test_clamp_timeout_defaults_on_invalid_type():
-    assert _clamp_timeout("abc") == 10
-    assert _clamp_timeout([10]) == 10
+    assert _clamp_timeout("abc") == 60
+    assert _clamp_timeout([10]) == 60
 
 
 def test_clamp_timeout_passes_valid_values():

@@ -130,7 +130,7 @@ Poll for the final result.
 ```
 
 **Important:** Results are **ephemeral** (in-memory only). They are lost when:
-- Session idle timeout expires (default: 600s)
+- Session idle timeout expires (default: 7200s)
 - Service/container is restarted
 - WazzapAgents must poll before timeout
 
@@ -223,7 +223,7 @@ Both **`.env`** and **`.env.secrets`** are git-ignored. Keep `LLM_API_KEY` exclu
 | `FLASK_PORT` | No | 5000 | Main service port |
 | `CONTAINER_EXECUTOR_URL` | No | `http://localhost:5001` | In-container executor URL |
 | `EXECUTOR_MANAGEMENT_MODE` | No | `auto` | `managed` lets a native host own Docker; `external` uses an existing sidecar. Compose sets `external`. |
-| `EXECUTOR_HTTP_TIMEOUT_GRACE` | No | 5 | Response-delivery grace added after a tool execution timeout. |
+| `EXECUTOR_HTTP_TIMEOUT_GRACE` | No | 15 | Response-delivery grace added after a tool execution timeout. |
 | `EXECUTOR_API_TOKEN` | Compose: Yes | — | Long random bearer token authenticating main-service tool calls to the executor. |
 | `EXECUTOR_REQUIRE_AUTH` | No | 1 | Fail startup when executor authentication is required but no token is configured. Set `0` only for loopback-only development. |
 | `EXECUTOR_BIND_HOST` | No | `127.0.0.1` | Executor listen address. Unauthenticated mode refuses non-loopback binds. |
@@ -237,7 +237,7 @@ Both **`.env`** and **`.env.secrets`** are git-ignored. Keep `LLM_API_KEY` exclu
 | `SUBAGENT_REQUIRE_API_AUTH` | No | 1 | Require API authentication. Set `0` only for loopback-only development. |
 | `SUBAGENT_BIND_HOST` | No | `127.0.0.1` | Main API listen address; Compose explicitly binds inside its private network. |
 | `SUBAGENT_WEBHOOK_TOKEN` | Compose: Yes | — | Separate token sent by this service to authenticate callbacks at WazzapAgents. |
-| `SESSION_IDLE_TIMEOUT` | No | 600 | Session result idle timeout (seconds) |
+| `SESSION_IDLE_TIMEOUT` | No | 7200 | Session result idle timeout (seconds) |
 | `LOG_LEVEL` | No | INFO | Logging level |
 | `WORKDIR_BASE` | No | `/tmp/work` (native) / `/storage/subagent_work` (compose) | Base directory for per-session workdirs. Must be on a filesystem the bridge can read so it can pick up `output_files`. |
 | `SUBAGENT_HOST_STORAGE_DIR` | No | `/storage` | Host directory bind-mounted to the fixed `/storage` container path. |

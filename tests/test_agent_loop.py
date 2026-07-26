@@ -162,8 +162,9 @@ def test_execute_retries_transient_llm_error(mock_llm_class, monkeypatch):
 @patch("src.agent.ChatOpenAI")
 def test_execute_retries_when_llm_returns_plain_text(mock_llm_class, monkeypatch):
     """If the LLM forgets to emit a tool_call we re-invoke at the same turn
-    rather than appending the bad text to history. After NO_TOOL_RETRY_MAX
-    failed attempts the agent gives up gracefully."""
+    with a temporary corrective system warning rather than appending the bad
+    text to history. After NO_TOOL_RETRY_MAX failed attempts the agent gives
+    up gracefully."""
     import src.agent as agent_module
 
     monkeypatch.setattr(agent_module, "NO_TOOL_RETRY_MAX", 2)
@@ -182,10 +183,21 @@ def test_execute_retries_when_llm_returns_plain_text(mock_llm_class, monkeypatch
     result = agent.execute("s4", "do something", [], "/tmp/work/s4")
     assert result["success"] is True
     assert result["report"] == "finally"
-    # Three invokes total — the two retries did NOT pollute the message
-    # history with the bad AIMessage (otherwise the third invoke would
-    # double-down on the same plain-text mistake).
+    # Three invokes total. The retries do not include the bad AIMessage, but
+    # do receive an explicit temporary correction requiring a native tool.
     assert mock_llm.invoke.call_count == 3
+    first_messages = mock_llm.invoke.call_args_list[0].args[0]
+    second_messages = mock_llm.invoke.call_args_list[1].args[0]
+    third_messages = mock_llm.invoke.call_args_list[2].args[0]
+    assert not any("TOOL CALL REQUIRED" in str(msg.content) for msg in first_messages)
+    assert isinstance(second_messages[-1], SystemMessage)
+    assert "TOOL CALL REQUIRED - retry 1/2" in second_messages[-1].content
+    assert "Do not reply with plain text" in second_messages[-1].content
+    assert "FINAL RETRY" not in second_messages[-1].content
+    assert isinstance(third_messages[-1], SystemMessage)
+    assert "TOOL CALL REQUIRED - retry 2/2" in third_messages[-1].content
+    assert "FINAL RETRY" in third_messages[-1].content
+    assert all("I am thinking out loud" not in str(msg.content) for msg in third_messages)
 
 
 @patch("src.agent.ChatOpenAI")
