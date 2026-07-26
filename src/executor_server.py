@@ -109,16 +109,7 @@ def _run_bounded(
         if os.name == "nt":
             options["creationflags"] = options.get("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
         else:
-            def _limit_output_files() -> None:
-                import resource
-
-                resource.setrlimit(
-                    resource.RLIMIT_FSIZE,
-                    (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES),
-                )
-
             options["start_new_session"] = True
-            options["preexec_fn"] = _limit_output_files
         process = subprocess.Popen(
             command,
             cwd=workdir,

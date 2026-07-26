@@ -5,7 +5,14 @@ from unittest.mock import patch
 
 import pytest
 
-from src.executor_server import create_executor_app, _clamp_timeout, _safe_remove, MAX_TIMEOUT
+from src.executor_server import (
+    MAX_OUTPUT_BYTES,
+    MAX_TIMEOUT,
+    _clamp_timeout,
+    _run_bounded,
+    _safe_remove,
+    create_executor_app,
+)
 
 
 @pytest.fixture
@@ -67,6 +74,28 @@ def test_python_valid_session_id(client):
     assert out["stdout"].strip() == "ok"
     assert out["returncode"] == 0
     assert os.path.isdir(os.path.join(base, "abc"))
+
+
+def test_execution_output_limit_does_not_limit_workdir_files(tmp_path):
+    target = tmp_path / "large-output.bin"
+    file_size = MAX_OUTPUT_BYTES + 1
+    code = (
+        "from pathlib import Path; "
+        f"Path({str(target)!r}).write_bytes(b'x' * {file_size})"
+    )
+
+    stdout, stderr, returncode, failure = _run_bounded(
+        [sys.executable, "-c", code],
+        workdir=str(tmp_path),
+        timeout=10,
+        isolation={},
+    )
+
+    assert stdout == ""
+    assert stderr == ""
+    assert returncode == 0
+    assert failure is None
+    assert target.stat().st_size == file_size
 
 
 def test_bash_respects_custom_timeout(client):
