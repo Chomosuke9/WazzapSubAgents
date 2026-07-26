@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from src.logger import get_logger
+from src.runtime_paths import workdir_base
 
 logger = get_logger(__name__)
 
@@ -236,9 +237,7 @@ class SessionManager:
         self.idle_timeout = idle_timeout
         self._sessions: Dict[str, Session] = {}
         self._lock = threading.RLock()
-        self._workdir_base = os.path.realpath(
-            os.getenv("WORKDIR_BASE", "/storage/subagent_work")
-        )
+        self._workdir_base = workdir_base()
         self._state_dir = os.path.realpath(
             os.getenv("SUBAGENT_STATE_DIR", os.path.join(self._workdir_base, ".state"))
         )

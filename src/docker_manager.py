@@ -10,6 +10,7 @@ import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 
 from src.logger import get_logger
+from src.runtime_paths import PROJECT_ROOT, workdir_base
 from src.tool_environment import parse_tool_env_passthrough
 
 logger = get_logger(__name__)
@@ -26,7 +27,7 @@ class DockerManager:
         container_port: int = 5001,
         executor_url: Optional[str] = None,
     ):
-        self.project_root = Path(__file__).resolve().parent.parent
+        self.project_root = PROJECT_ROOT
         self.image_name = image_name
         self.dockerfile_path = str(
             self.project_root if dockerfile_path == "." else Path(dockerfile_path).resolve()
@@ -157,19 +158,14 @@ class DockerManager:
             # Mount only the per-session workdir tree. The main service copies
             # accepted inputs into each workdir, so the executor never needs
             # visibility into the parent's raw /storage staging tree.
-            default_workdir_base = (
-                self.project_root / ".runtime" / "subagent_work"
-            )
+            resolved_workdir_base = workdir_base()
 
-            workdir_base = os.path.realpath(
-                os.path.expanduser(
-                    os.getenv("WORKDIR_BASE", str(default_workdir_base))
-                )
-            )
-
-            os.makedirs(workdir_base, exist_ok=True)
+            os.makedirs(resolved_workdir_base, exist_ok=True)
             volumes = {
-                workdir_base: {"bind": workdir_base, "mode": "rw"},
+                resolved_workdir_base: {
+                    "bind": resolved_workdir_base,
+                    "mode": "rw",
+                },
             }
 
             # Project code and skills — read-only, agent must never modify these
@@ -193,7 +189,7 @@ class DockerManager:
             # parser changes cannot let a passthrough value override them.
             container_environment.update({
                 "FLASK_PORT": str(self.container_port),
-                "WORKDIR_BASE": workdir_base,
+                "WORKDIR_BASE": resolved_workdir_base,
                 "EXECUTOR_REQUIRE_UID_ISOLATION": "1",
                 "EXECUTOR_PARENT_UID": str(
                     os.getuid() if hasattr(os, "getuid") else 0
@@ -220,7 +216,7 @@ class DockerManager:
                 "Container started",
                 extra={
                     "container": self.container_name,
-                    "workdir_base": workdir_base,
+                    "workdir_base": resolved_workdir_base,
                     "volumes": list(volumes.keys()),
                 },
             )

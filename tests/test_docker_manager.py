@@ -4,6 +4,7 @@ import pytest
 from docker.errors import DockerException, ImageNotFound
 
 from src.docker_manager import DockerManager
+from src.runtime_paths import PROJECT_ROOT
 
 
 class TestDockerManagerInit:
@@ -83,6 +84,18 @@ class TestContainerRunning:
 
 
 class TestStartContainer:
+    def test_default_workdir_matches_session_manager(
+        self, mock_docker_client, monkeypatch
+    ):
+        monkeypatch.delenv("WORKDIR_BASE", raising=False)
+        dm = DockerManager()
+        dm.start_container()
+
+        kwargs = mock_docker_client.containers.run.call_args.kwargs
+        expected = str((PROJECT_ROOT / ".runtime" / "subagent_work").resolve())
+        assert kwargs["environment"]["WORKDIR_BASE"] == expected
+        assert kwargs["volumes"][expected]["bind"] == expected
+
     def test_forwards_only_allowed_skill_env_and_host_gateway(
         self, mock_docker_client, monkeypatch, tmp_path
     ):

@@ -4,7 +4,16 @@ import time
 
 import pytest
 
+from src.runtime_paths import PROJECT_ROOT
 from src.session_manager import SessionManager
+
+
+def test_default_workdir_base_is_repository_runtime_dir(monkeypatch):
+    monkeypatch.delenv("WORKDIR_BASE", raising=False)
+    sm = SessionManager()
+    assert sm._workdir_base == os.path.realpath(
+        PROJECT_ROOT / ".runtime" / "subagent_work"
+    )
 
 
 def test_create_session():
