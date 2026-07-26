@@ -21,3 +21,6 @@ The 9Router skill suite was vendored from [`decolua/9router`](https://github.com
 
 ## Usage
 When performing tasks related to these file formats, refer to the `SKILL.md` file within the respective folder for detailed API usage, code templates, and best practices.
+
+## Pro Tips
+Since you can't see the images directly, read `/skills/9router/SKILL.md` to use other llm to analyze image directly. For example, you can preview the images you need to analyze with that.
