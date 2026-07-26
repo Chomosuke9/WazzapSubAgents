@@ -366,6 +366,7 @@ blocks on the bridge.
 
 Tunables (all env-overridable):
 
+- `AGENT_MAX_ITERATIONS=50` — max ReAct turns per task; `0` disables the cap.
 - `AGENT_LLM_RETRY_MAX=5` — retries on 429 / 5xx / timeout / connection.
 - `AGENT_LLM_RETRY_BASE_BACKOFF=2.0`, `AGENT_LLM_RETRY_MAX_BACKOFF=60.0`.
 - `AGENT_STUCK_LOOP_THRESHOLD=5` — max repeated identical tool calls before
@@ -438,6 +439,7 @@ System config (including `LLM_API_KEY` and `NINEROUTER_URL`) lives in `.env`. Sk
 | `SUBAGENT_STORAGE_DIR`        | `/storage`                     | Host path of the `/storage` bind mount |
 | `SESSION_IDLE_TIMEOUT`        | `7200`                         | Seconds before a completed session's workdir is deleted |
 | `SUBAGENT_GLOBAL_LIMIT`       | `1`                            | Max concurrent agent executions |
+| `AGENT_MAX_ITERATIONS`        | `50`                           | Max ReAct turns per task; `0` means unlimited |
 | `AGENT_LLM_RETRY_MAX`         | `5`                            | LLM call retry budget |
 | `AGENT_STUCK_LOOP_THRESHOLD`  | `5`                            | Max identical tool calls before aborting |
 | `AGENT_NO_TOOL_RETRY_MAX`     | `3`                            | Max plain-text replies before aborting |

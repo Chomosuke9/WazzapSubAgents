@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import time
@@ -28,6 +29,7 @@ LLM_RETRY_MAX = int(os.getenv("AGENT_LLM_RETRY_MAX", "5"))
 LLM_RETRY_BASE_BACKOFF = float(os.getenv("AGENT_LLM_RETRY_BASE_BACKOFF", "2.0"))
 LLM_RETRY_MAX_BACKOFF = float(os.getenv("AGENT_LLM_RETRY_MAX_BACKOFF", "60.0"))
 STUCK_LOOP_THRESHOLD = int(os.getenv("AGENT_STUCK_LOOP_THRESHOLD", "5"))
+MAX_ITERATIONS = max(0, int(os.getenv("AGENT_MAX_ITERATIONS", "50")))
 # How many times to re-invoke the LLM at the same turn when it returns plain
 # text (no native tool_call). Prevents infinite loops on a misconfigured model.
 NO_TOOL_RETRY_MAX = int(os.getenv("AGENT_NO_TOOL_RETRY_MAX", "3"))
@@ -973,12 +975,12 @@ class ExecutorAgent:
                 )
             return len(fresh)
 
-        max_iterations = 50
         final_result: Optional[Dict[str, Any]] = None
         last_signature: Optional[str] = None
         repeat_count = 0
+        iterations = itertools.count() if MAX_ITERATIONS == 0 else range(MAX_ITERATIONS)
 
-        for i in range(max_iterations):
+        for i in iterations:
             # A /steer request may arrive while this run is still queued or
             # before its first LLM invocation. Consume it before every invoke,
             # including the very first one.

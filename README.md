@@ -220,6 +220,7 @@ Both **`.env`** and **`.env.secrets`** are git-ignored. Keep `LLM_API_KEY` exclu
 | `LLM_API_KEY` | Yes | — | LLM API key (e.g. Anthropic, OpenAI) |
 | `AGENT_MODEL` | Yes | — | Model name (e.g. `claude-3-5-sonnet`) |
 | `AGENT_TEMPERATURE` | No | 0.7 | Sampling temperature |
+| `AGENT_MAX_ITERATIONS` | No | 50 | Maximum ReAct turns per task. Set `0` for unlimited iterations. |
 | `FLASK_PORT` | No | 5000 | Main service port |
 | `CONTAINER_EXECUTOR_URL` | No | `http://localhost:5001` | In-container executor URL |
 | `EXECUTOR_MANAGEMENT_MODE` | No | `auto` | `managed` lets a native host own Docker; `external` uses an existing sidecar. Compose sets `external`. |

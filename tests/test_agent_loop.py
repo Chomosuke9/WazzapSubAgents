@@ -107,6 +107,27 @@ def test_execute_max_iterations(mock_llm_class):
 
 
 @patch("src.agent.ChatOpenAI")
+def test_execute_allows_unlimited_iterations_when_configured(mock_llm_class):
+    client = MagicMock()
+    sm = MagicMock()
+    client.run_bash.return_value = {"stdout": "", "stderr": "", "returncode": 0}
+    mock_llm = MagicMock()
+    mock_llm_class.return_value.bind_tools.return_value = mock_llm
+    mock_llm.invoke.side_effect = [
+        _make_response([_bash_tc(f"step {i}", f"echo {i}", f"tc-{i}")])
+        for i in range(55)
+    ] + [_make_response([_end_tc(True, "Done", "tc-end")])]
+
+    agent = ExecutorAgent(client, sm)
+    with patch("src.agent.MAX_ITERATIONS", 0):
+        result = agent.execute("s1", "do something", [], "/tmp/work/s1")
+
+    assert result["success"] is True
+    assert result["report"] == "Done"
+    assert sm.append_progress.call_count == 55
+
+
+@patch("src.agent.ChatOpenAI")
 def test_execute_stops_on_stuck_loop(mock_llm_class):
     client = MagicMock()
     sm = MagicMock()
