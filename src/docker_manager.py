@@ -157,7 +157,16 @@ class DockerManager:
             # Mount only the per-session workdir tree. The main service copies
             # accepted inputs into each workdir, so the executor never needs
             # visibility into the parent's raw /storage staging tree.
-            workdir_base = os.getenv("WORKDIR_BASE", "/storage/subagent_work")
+            default_workdir_base = (
+                self.project_root / ".runtime" / "subagent_work"
+            )
+
+            workdir_base = os.path.realpath(
+                os.path.expanduser(
+                    os.getenv("WORKDIR_BASE", str(default_workdir_base))
+                )
+            )
+
             os.makedirs(workdir_base, exist_ok=True)
             volumes = {
                 workdir_base: {"bind": workdir_base, "mode": "rw"},
