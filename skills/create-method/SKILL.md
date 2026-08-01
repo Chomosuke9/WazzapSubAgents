@@ -1,6 +1,6 @@
 ---
 name: create-method
-description: Create or repair exactly one reusable top-level Markdown procedure in /methods from an objectively validated successful task. Use after a skill or fallback route succeeds, after a stale method is corrected and revalidated, or when explicitly asked to author, update, repair, or validate a method. Do not use after failure, partial completion, or when an existing method worked unchanged.
+description: Create, generalize, or repair exactly one reusable top-level Markdown procedure in /methods from an objectively validated successful task. Use after a skill or fallback route succeeds, after a stale method is corrected and revalidated, or when explicitly asked to author, update, repair, consolidate, or validate a method. Prefer an existing method or broaden it safely instead of creating topic-specific duplicates. Do not use after failure, partial completion, or when an existing method worked unchanged.
 ---
 
 # Create Method
@@ -20,14 +20,56 @@ experimentation.
 - Do not create competing files for the same case. Preserve useful validated
   guidance when repairing an existing method.
 
+## Pass the generalization gate
+
+Identify the method by its reusable mechanism, not by the subject of the
+current request.
+
+1. Derive a procedure signature from the action, tool/API or source protocol,
+   input type, output type, materially different options, and validation.
+2. Remove incidental details: person, city, country, route, game, team, brand,
+   event, date, query topic, visual theme, prompt wording, and filenames.
+3. Compare that signature with existing methods by reading their `Applies
+   when`, `Procedure`, `One line command`, and `Validate` sections. Do not rely
+   on filename similarity alone.
+4. Ask: "Would the same commands and checks work if the incidental details
+   changed?" If yes, express those details as placeholders and reuse the same
+   method.
+5. Prefer updating one existing method with a validated placeholder or small
+   optional branch when that covers the new case. Do not create a sibling file.
+6. Create a new method only for a material procedural difference, such as a
+   different API/protocol, authentication flow, required dependency, command
+   sequence, input/output handling, failure recovery, or validation contract.
+
+A different topic, location, brand, style, requested text, or argument value is
+not a material procedural difference. Conversely, do not collapse unrelated
+workflows merely because both happen to use Bash, Python, curl, or web search.
+
+Examples:
+
+| Too narrow | Prefer when the underlying procedure is shared |
+|---|---|
+| `research-jakarta-madura-travel.md` | `research-travel-route.md` |
+| `research-game-event-schedule-indonesia.md` | `research-event-schedule.md` |
+| `ocr-terminal-screenshot.md` | `ocr-image-text.md` |
+| `zip-methods-only.md` | `create-filtered-zip-archive.md` |
+| `create-esports-logo-png.md` and `create-ff-profile-card-png.md` | One parameterized image-rendering method if the renderer and checks are the same |
+
+Keep a source or service name such as `youtube`, `tiktok`, or `9router` only
+when it changes the reusable commands, API contract, or validation. Keep an
+output format such as `mp4` only when it materially changes processing or
+checks.
+
 ## Select the destination
 
 1. Use only `/methods/<case-name>.md`; never create nested directories or
    edit `/methods/README.md`.
-2. Reuse the existing matching file when one covers the same task, source,
-   input type, and output goal.
-3. Choose a short action-and-subject name such as
-   `download-tiktok-video.md` or `extract-tables-from-pdf.md`.
+2. Reuse the existing matching file when parameterization or one small
+   validated branch can cover the new case.
+3. Choose a short action-and-mechanism name such as
+   `download-web-video.md`, `ocr-image-text.md`, or
+   `extract-tables-from-pdf.md`. Do not put request-specific proper nouns in
+   the filename unless they identify a materially distinct source or service.
 4. Refuse to follow or replace a symlink. The target must be absent or a regular
    top-level file.
 
@@ -69,6 +111,9 @@ Apply all of these rules:
 
 - Include only steps that contributed to the validated success. Do not preserve
   a blind retry matrix, failed-only experiments, logs, or speculative fixes.
+- Write `Applies when` around observable inputs, mechanisms, constraints, and
+  outcomes. Do not restrict it to the current topic when the procedure is
+  otherwise identical.
 - Replace task-specific URLs, filenames, IDs, usernames, session paths, and
   output paths with clear placeholders such as `<URL>`, `<INPUT_FILE>`, and
   `<OUTPUT_BASENAME>`.
@@ -104,8 +149,9 @@ Apply all of these rules:
 1. Write a temporary file inside `/methods` so the final rename stays on the
    same filesystem.
 2. Read the temporary file back and check its structure, placeholders,
-   dependency pins, tested one-line command, expected results, validation
-   command, and absence of sensitive/task-specific data.
+   generality, overlap with existing methods, dependency pins, tested one-line
+   command, expected results, validation command, and absence of
+   sensitive/task-specific data.
 3. Atomically rename the temporary file over the selected target only after all
    checks pass. Remove the temporary file on failure.
 4. Read the final file back and confirm it is the intended regular file.

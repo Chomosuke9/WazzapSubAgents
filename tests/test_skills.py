@@ -44,6 +44,13 @@ def test_create_method_skill_is_installed_and_catalogued():
     assert re.search(r"(?m)^name:\s*create-method\s*$", text)
     assert "objectively validated successful task" in text
     assert "Do not write anything when the task failed" in text
+    assert "## Pass the generalization gate" in text
+    assert "Would the same commands and checks work" in text
+    assert "filename similarity alone" in text
+    assert "different topic, location, brand, style" in text
+    assert "Create a new method only for a material procedural difference" in text
+    assert "research-travel-route.md" in text
+    assert "ocr-image-text.md" in text
     assert "## One line command" in text
     assert "## Expected result" in text
     assert "Expected output:" in text
@@ -52,3 +59,11 @@ def test_create_method_skill_is_installed_and_catalogued():
     assert "Atomically rename" in text
     assert "Never include a method file in `output_files`" in text
     assert "[create-method](./create-method)" in catalog
+
+
+def test_methods_contract_requires_mechanism_level_reuse():
+    text = (PROJECT_ROOT / "methods" / "README.md").read_text(encoding="utf-8")
+
+    assert "underlying operation and mechanism" in text
+    assert "reuse or safely broaden the existing method" in text
+    assert "A new method requires a material difference" in text

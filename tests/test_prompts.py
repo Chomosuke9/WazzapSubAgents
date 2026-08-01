@@ -12,6 +12,8 @@ def test_system_prompt_injects_catalog_and_skips_redundant_readme_call():
     assert "Your FIRST tool call for every task must inspect" in prompt
     assert "After a task succeeds through the skills/fallback route" in prompt
     assert "Do not write a method for a failed or partially completed task" in prompt
+    assert "not the request's topic, entity, location, brand, or visual theme" in prompt
+    assert "create a new file only for a material procedural difference" in prompt
     assert "a tested one-line command" in prompt
     assert "independent validation command with expected checking output" in prompt
     assert "python -m pip install --target /dependencies/python" in prompt

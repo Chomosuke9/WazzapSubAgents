@@ -5,16 +5,22 @@ bind-mounted at `/methods` with read-write access. The `skills/` directory is a
 separate read-only reference library.
 
 Each learned procedure lives in one top-level, kebab-case Markdown file, for
-example `download-tiktok-video.md`. Keep methods short, parameterized, and based
+example `download-web-video.md`. Keep methods short, parameterized, and based
 only on a procedure that produced an objectively validated successful result.
+Identify methods by the underlying operation and mechanism, not the request's
+topic, place, person, brand, visual theme, or one-off arguments. If the same
+commands and validation work after replacing those details with placeholders,
+reuse or safely broaden the existing method instead of creating another file.
+A new method requires a material difference in API/protocol, authentication,
+dependency, command sequence, input/output handling, recovery, or validation.
 
 Use this shape:
 
 ```markdown
-# Download TikTok video
+# Download web video
 
 ## Applies when
-- The input is a public TikTok post URL.
+- The input is a public media-page URL supported by the downloader.
 - The requested output is a playable video file.
 
 ## Prerequisites
