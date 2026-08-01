@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -40,15 +39,9 @@ AGENT_TEMPERATURE_HIGH = float(os.getenv("AGENT_TEMPERATURE_HIGH", "0.3"))
 SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "7200"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
-CONTAINER_EXECUTOR_URL = os.getenv("CONTAINER_EXECUTOR_URL", "http://localhost:5001")
-_executor_url = urlsplit(CONTAINER_EXECUTOR_URL)
-if _executor_url.scheme not in {"http", "https"} or not _executor_url.hostname:
-    raise ValueError("CONTAINER_EXECUTOR_URL must be an absolute http(s) URL")
-EXECUTOR_MANAGEMENT_MODE = os.getenv("EXECUTOR_MANAGEMENT_MODE", "auto").strip().lower()
-if EXECUTOR_MANAGEMENT_MODE not in {"auto", "managed", "external"}:
-    raise ValueError(
-        "EXECUTOR_MANAGEMENT_MODE must be one of: auto, managed, external"
-    )
+EXECUTOR_PORT = int(os.getenv("EXECUTOR_PORT", "5001"))
+if not 1 <= EXECUTOR_PORT <= 65535:
+    raise ValueError("EXECUTOR_PORT must be between 1 and 65535")
 EXECUTOR_HTTP_TIMEOUT_GRACE = float(os.getenv("EXECUTOR_HTTP_TIMEOUT_GRACE", "15"))
 if EXECUTOR_HTTP_TIMEOUT_GRACE < 1:
     raise ValueError("EXECUTOR_HTTP_TIMEOUT_GRACE must be at least 1 second")
@@ -78,8 +71,7 @@ config = {
     "session_idle_timeout": SESSION_IDLE_TIMEOUT,
     "log_level": LOG_LEVEL,
     "flask_port": FLASK_PORT,
-    "container_executor_url": CONTAINER_EXECUTOR_URL,
-    "executor_management_mode": EXECUTOR_MANAGEMENT_MODE,
+    "executor_port": EXECUTOR_PORT,
     "executor_http_timeout_grace": EXECUTOR_HTTP_TIMEOUT_GRACE,
     "executor_api_token": EXECUTOR_API_TOKEN,
     "executor_require_auth": EXECUTOR_REQUIRE_AUTH,

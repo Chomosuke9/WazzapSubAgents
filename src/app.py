@@ -20,6 +20,7 @@ from src.container_client import ContainerClient
 from src.docker_manager import DockerManager
 from src.input_staging import rehydrate_staged_inputs, stage_request_inputs
 from src.logger import get_logger
+from src.runtime_paths import host_path_to_sandbox
 from src.session_manager import (
     SessionManager,
     SessionPersistenceError,
@@ -199,15 +200,14 @@ def _upload_ids(raw_inputs: list[Any]) -> list[str]:
 
 
 def create_app(
-    docker_mgr: DockerManager | None = None,
+    docker_mgr: DockerManager,
     queue: SubAgentQueue | None = None,
     session_manager: SessionManager | None = None,
-    container_url: str | None = None,
 ) -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = _MAX_REQUEST_BYTES
 
-    resolved_container_url = container_url or config["container_executor_url"]
+    resolved_container_url = docker_mgr.get_container_url()
     container_client = ContainerClient(resolved_container_url, docker_mgr=docker_mgr)
     if session_manager is None:
         session_manager = SessionManager(idle_timeout=config["session_idle_timeout"])
@@ -534,7 +534,12 @@ def create_app(
 
         steer_message = instruction
         if staging.paths:
-            files_block = "\n".join(f"- {path}" for path in staging.paths)
+            host_workdir_base = os.path.dirname(os.path.realpath(session.workdir))
+            sandbox_paths = [
+                host_path_to_sandbox(path, host_base=host_workdir_base)
+                for path in staging.paths
+            ]
+            files_block = "\n".join(f"- {path}" for path in sandbox_paths)
             steer_message = (
                 f"{instruction}\n\n"
                 "[NEW INPUT FILES - provided with this steering instruction, "

@@ -40,5 +40,5 @@ def isolated_persistent_state(tmp_path, monkeypatch):
 @pytest.fixture
 def mock_docker_client(monkeypatch):
     client = MagicMock()
-    monkeypatch.setattr("docker.DockerClient", lambda **kwargs: client)
+    monkeypatch.setattr("docker.from_env", lambda: client)
     return client

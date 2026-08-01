@@ -22,7 +22,8 @@ def protocol(tmp_path, monkeypatch):
     monkeypatch.setenv("SUBAGENT_INPUT_SOURCE_ROOT", str(uploads))
     manager = SessionManager(idle_timeout=600)
     docker = MagicMock()
-    app = create_app(docker_mgr=docker, session_manager=manager, container_url="http://executor:5001")
+    docker.get_container_url.return_value = "http://127.0.0.1:5001"
+    app = create_app(docker_mgr=docker, session_manager=manager)
     return app.test_client(), manager, uploads
 
 

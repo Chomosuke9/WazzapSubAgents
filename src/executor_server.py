@@ -4,6 +4,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable
 
@@ -49,6 +51,115 @@ TOOL_ENV_ALLOWLIST = {
 TOOL_ENV_PASSTHROUGH = {
     name.upper() for name in parse_tool_env_passthrough()
 }
+METHODS_MARKER = ".methods-root"
+METHODS_MARKER_CONTENT = "wazzapsubagents-methods-v1"
+DEPENDENCIES_MARKER = ".dependencies-root"
+DEPENDENCIES_MARKER_CONTENT = "wazzapsubagents-dependencies-v1"
+
+
+def _prepare_shared_methods_directory(methods_dir: str) -> bool:
+    """Make learned method docs shareable by every isolated session UID.
+
+    Session commands intentionally use a restrictive ``umask``. The executor
+    therefore normalizes only the marked methods directory after each command;
+    workdir permissions and cross-session isolation remain unchanged.
+    """
+    root = Path(methods_dir)
+    try:
+        marker = root / METHODS_MARKER
+        if (
+            not root.is_dir()
+            or root.is_symlink()
+            or marker.is_symlink()
+            or not marker.is_file()
+            or marker.read_text(encoding="utf-8").strip() != METHODS_MARKER_CONTENT
+        ):
+            return False
+        os.chmod(root, 0o777)
+        for candidate in root.iterdir():
+            if (
+                candidate.is_symlink()
+                or not candidate.is_file()
+                or candidate.suffix.lower() not in {".md", ".txt"}
+            ):
+                continue
+            os.chmod(candidate, 0o666)
+        return True
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "Methods directory permissions could not be normalized",
+            extra={"methods_dir": str(root), "error": str(exc)},
+        )
+        return False
+
+
+def _prepare_shared_dependencies_directory(dependencies_dir: str) -> bool:
+    """Prepare a marked persistent dependency tree for all session UIDs."""
+    root = Path(dependencies_dir)
+    try:
+        marker = root / DEPENDENCIES_MARKER
+        if (
+            not root.is_dir()
+            or root.is_symlink()
+            or marker.is_symlink()
+            or not marker.is_file()
+            or marker.read_text(encoding="utf-8").strip()
+            != DEPENDENCIES_MARKER_CONTENT
+        ):
+            return False
+
+        for name in ("python", "node", "bin", "cache"):
+            (root / name).mkdir(exist_ok=True)
+
+        directories: list[str] = []
+        for current_root, dirs, files in os.walk(root, topdown=True, followlinks=False):
+            if os.path.islink(current_root):
+                dirs[:] = []
+                continue
+            dirs[:] = [
+                name
+                for name in dirs
+                if not os.path.islink(os.path.join(current_root, name))
+            ]
+            os.chmod(current_root, 0o777)
+            directories.append(current_root)
+            for name in files:
+                path = os.path.join(current_root, name)
+                if os.path.islink(path):
+                    continue
+                executable = os.stat(path, follow_symlinks=False).st_mode & 0o111
+                os.chmod(path, 0o666 | (0o111 if executable else 0))
+
+        setfacl = shutil.which("setfacl")
+        if os.name != "nt" and setfacl:
+            acl = (
+                "u::rwx,g::rwx,o::rwx,m::rwx,"
+                "d:u::rwx,d:g::rwx,d:o::rwx,d:m::rwx"
+            )
+            for offset in range(0, len(directories), 128):
+                subprocess.run(
+                    [setfacl, "-m", acl, *directories[offset:offset + 128]],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        return True
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "Dependencies directory permissions could not be normalized",
+            extra={"dependencies_dir": str(root), "error": str(exc)},
+        )
+        return False
+
+
+def _may_modify_dependencies(source: str) -> bool:
+    """Return whether a generated command may mutate persistent dependencies."""
+    lowered = source.lower()
+    if "/dependencies" in lowered:
+        return True
+    return bool(
+        re.search(r"\b(?:pip3?|npm)\b[^\n]*(?:\binstall\b|\bi\b|\badd\b)", lowered)
+    )
 
 
 def _clamp_timeout(timeout, default: int = DEFAULT_EXECUTION_TIMEOUT) -> int | float:
@@ -72,6 +183,36 @@ def _safe_remove(path: str) -> None:
             os.remove(path)
     except OSError as exc:
         logger.warning("Failed to remove temp file %s: %s", path, exc)
+
+
+def _write_session_script(path: str, source: str, isolation: dict) -> None:
+    """Create a private script that the isolated session UID can read.
+
+    The executor HTTP process runs as root so it can assign a distinct UID to
+    each session. Creating a script with normal ``open()`` would therefore
+    leave it owned by root; inherited ACLs or a restrictive parent umask can
+    then make Python/Node fail while direct shell commands still work.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file_handle:
+            descriptor = -1
+            file_handle.write(source)
+            file_handle.flush()
+            os.fsync(file_handle.fileno())
+        if "user" in isolation and hasattr(os, "chown"):
+            uid = int(isolation["user"])
+            gid = int(isolation.get("group", uid))
+            os.chown(path, uid, gid)
+        os.chmod(path, 0o600)
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        _safe_remove(path)
+        raise
 
 
 def _terminate_process_tree(process: subprocess.Popen) -> None:
@@ -158,6 +299,8 @@ def create_executor_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
     workdir_base = os.getenv("WORKDIR_BASE", "/storage/subagent_work")
+    methods_dir = os.getenv("METHODS_DIR", "/methods")
+    dependencies_dir = os.getenv("DEPENDENCIES_DIR", "/dependencies")
     bind_host = os.getenv("EXECUTOR_BIND_HOST", "127.0.0.1").strip()
     api_token = os.getenv("EXECUTOR_API_TOKEN", "").strip()
     require_auth = os.getenv("EXECUTOR_REQUIRE_AUTH", "1").strip().lower() in {
@@ -172,6 +315,7 @@ def create_executor_app() -> Flask:
             "Unauthenticated executor mode is allowed only on a loopback bind address"
         )
     result_lock = threading.RLock()
+    dependency_lock = threading.RLock()
     result_cache: "OrderedDict[tuple[str, str, str], tuple[str, dict, int]]" = OrderedDict()
     in_flight: dict[tuple[str, str, str], tuple[str, threading.Event]] = {}
     uid_lock = threading.RLock()
@@ -271,6 +415,31 @@ def create_executor_app() -> Flask:
                 key in TOOL_ENV_ALLOWLIST or key.upper() in TOOL_ENV_PASSTHROUGH
             ) and key.upper() not in TOOL_ENV_BLOCKLIST
         }
+        dependency_python = os.path.join(dependencies_dir, "python")
+        dependency_python_bin = os.path.join(dependency_python, "bin")
+        dependency_node = os.path.join(dependencies_dir, "node")
+        dependency_node_modules = os.path.join(dependency_node, "node_modules")
+        dependency_bin = os.path.join(dependencies_dir, "bin")
+        dependency_node_bin = os.path.join(dependency_node_modules, ".bin")
+        dependency_cache = os.path.join(dependencies_dir, "cache")
+        runtime_path = os.pathsep.join(
+            part
+            for part in (
+                dependency_bin,
+                dependency_python_bin,
+                dependency_node_bin,
+                tool_env.get("PATH", os.defpath),
+            )
+            if part
+        )
+        node_path = os.pathsep.join(
+            part
+            for part in (
+                dependency_node_modules,
+                tool_env.get("NODE_PATH", ""),
+            )
+            if part
+        )
         tool_env.update({
             "HOME": workdir,
             "USER": "subagent",
@@ -278,6 +447,14 @@ def create_executor_app() -> Flask:
             "TMPDIR": temp_dir,
             "TMP": temp_dir,
             "TEMP": temp_dir,
+            "PATH": runtime_path,
+            "PYTHONPATH": dependency_python,
+            "PIP_TARGET": dependency_python,
+            "PIP_CACHE_DIR": os.path.join(dependency_cache, "pip"),
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "NODE_PATH": node_path,
+            "NPM_CONFIG_PREFIX": dependency_node,
+            "NPM_CONFIG_CACHE": os.path.join(dependency_cache, "npm"),
         })
         if os.name == "nt" or not REQUIRE_UID_ISOLATION:
             return {"env": tool_env}
@@ -317,8 +494,8 @@ def create_executor_app() -> Flask:
                 "WORKDIR_BASE filesystem does not enforce required UID/mode isolation"
             )
         if EXECUTOR_PARENT_UID not in {0, uid}:
-            # Native mode commonly runs the main service as a non-root host
-            # user. Preserve that user's access without granting it to sibling
+            # The host service commonly runs as a non-root user on Linux.
+            # Preserve that user's access without granting it to sibling
             # session UIDs. Default ACLs cover files created by later commands.
             for current_root, dirs, files in os.walk(workdir, followlinks=False):
                 subprocess.run(
@@ -351,6 +528,16 @@ def create_executor_app() -> Flask:
         }
 
     os.makedirs(workdir_base, exist_ok=True)
+    if not _prepare_shared_methods_directory(methods_dir):
+        logger.warning(
+            "Shared methods directory is unavailable or missing its marker",
+            extra={"methods_dir": methods_dir},
+        )
+    if not _prepare_shared_dependencies_directory(dependencies_dir):
+        logger.warning(
+            "Shared dependencies directory is unavailable or missing its marker",
+            extra={"dependencies_dir": dependencies_dir},
+        )
     uid_secret = _load_uid_secret()
     _load_uid_markers()
 
@@ -562,24 +749,31 @@ def create_executor_app() -> Flask:
         logger.info("Executing bash", extra={"session_id": session_id, "command": command[:200], "timeout": timeout})
 
         def operation() -> tuple[dict, int]:
-            try:
-                stdout, stderr, returncode, failure = _run_bounded(
-                    command,
-                    workdir=workdir,
-                    timeout=timeout,
-                    isolation={**isolation, "shell": True},
-                )
-                if failure:
-                    return {"error": f"Bash {failure.lower()}", "request_id": request_id}, 200
-                return {
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "returncode": returncode,
-                    "request_id": request_id,
-                }, 200
-            except Exception as exc:
-                logger.error("Bash execution failed", exc_info=True)
-                return {"error": str(exc), "request_id": request_id}, 500
+            dependency_mutation = _may_modify_dependencies(command)
+            lock = dependency_lock if dependency_mutation else nullcontext()
+            with lock:
+                try:
+                    stdout, stderr, returncode, failure = _run_bounded(
+                        command,
+                        workdir=workdir,
+                        timeout=timeout,
+                        isolation={**isolation, "shell": True},
+                    )
+                    if failure:
+                        return {"error": f"Bash {failure.lower()}", "request_id": request_id}, 200
+                    return {
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "returncode": returncode,
+                        "request_id": request_id,
+                    }, 200
+                except Exception as exc:
+                    logger.error("Bash execution failed", exc_info=True)
+                    return {"error": str(exc), "request_id": request_id}, 500
+                finally:
+                    _prepare_shared_methods_directory(methods_dir)
+                    if dependency_mutation:
+                        _prepare_shared_dependencies_directory(dependencies_dir)
 
         payload, status = _execute_idempotently(workdir, "bash", request_id, fingerprint, operation)
         return jsonify(payload), status
@@ -605,29 +799,37 @@ def create_executor_app() -> Flask:
         logger.info("Executing javascript", extra={"session_id": session_id, "code": code[:200], "timeout": timeout})
 
         def operation() -> tuple[dict, int]:
-            js_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.js")
-            try:
-                with open(js_file, "w", encoding="utf-8") as file_handle:
-                    file_handle.write(code)
-                stdout, stderr, returncode, failure = _run_bounded(
-                    ["node", js_file],
-                    workdir=workdir,
-                    timeout=timeout,
-                    isolation=isolation,
-                )
-                if failure:
-                    return {"error": f"Javascript {failure.lower()}", "request_id": request_id}, 200
-                return {
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "returncode": returncode,
-                    "request_id": request_id,
-                }, 200
-            except Exception as exc:
-                logger.error("Javascript execution failed", exc_info=True)
-                return {"error": str(exc), "request_id": request_id}, 500
-            finally:
-                _safe_remove(js_file)
+            js_file = os.path.join(
+                isolation["env"]["TMPDIR"],
+                f"script-{uuid.uuid4().hex}.js",
+            )
+            dependency_mutation = _may_modify_dependencies(code)
+            lock = dependency_lock if dependency_mutation else nullcontext()
+            with lock:
+                try:
+                    _write_session_script(js_file, code, isolation)
+                    stdout, stderr, returncode, failure = _run_bounded(
+                        ["node", js_file],
+                        workdir=workdir,
+                        timeout=timeout,
+                        isolation=isolation,
+                    )
+                    if failure:
+                        return {"error": f"Javascript {failure.lower()}", "request_id": request_id}, 200
+                    return {
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "returncode": returncode,
+                        "request_id": request_id,
+                    }, 200
+                except Exception as exc:
+                    logger.error("Javascript execution failed", exc_info=True)
+                    return {"error": str(exc), "request_id": request_id}, 500
+                finally:
+                    _safe_remove(js_file)
+                    _prepare_shared_methods_directory(methods_dir)
+                    if dependency_mutation:
+                        _prepare_shared_dependencies_directory(dependencies_dir)
 
         payload, status = _execute_idempotently(workdir, "javascript", request_id, fingerprint, operation)
         return jsonify(payload), status
@@ -657,29 +859,37 @@ def create_executor_app() -> Flask:
         # This mirrors how /javascript and /bash already spawn child processes.
         # Use uuid4 to guarantee uniqueness even under concurrent requests.
         def operation() -> tuple[dict, int]:
-            py_file = os.path.join(workdir, f".tmp_script_{uuid.uuid4().hex}.py")
-            try:
-                with open(py_file, "w", encoding="utf-8") as file_handle:
-                    file_handle.write(code)
-                stdout, stderr, returncode, failure = _run_bounded(
-                    [sys.executable, py_file],
-                    workdir=workdir,
-                    timeout=timeout,
-                    isolation=isolation,
-                )
-                if failure:
-                    return {"error": f"Python {failure.lower()}", "request_id": request_id}, 200
-                return {
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "returncode": returncode,
-                    "request_id": request_id,
-                }, 200
-            except Exception as exc:
-                logger.error("Python execution failed", exc_info=True)
-                return {"error": str(exc), "request_id": request_id}, 500
-            finally:
-                _safe_remove(py_file)
+            py_file = os.path.join(
+                isolation["env"]["TMPDIR"],
+                f"script-{uuid.uuid4().hex}.py",
+            )
+            dependency_mutation = _may_modify_dependencies(code)
+            lock = dependency_lock if dependency_mutation else nullcontext()
+            with lock:
+                try:
+                    _write_session_script(py_file, code, isolation)
+                    stdout, stderr, returncode, failure = _run_bounded(
+                        [sys.executable, py_file],
+                        workdir=workdir,
+                        timeout=timeout,
+                        isolation=isolation,
+                    )
+                    if failure:
+                        return {"error": f"Python {failure.lower()}", "request_id": request_id}, 200
+                    return {
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "returncode": returncode,
+                        "request_id": request_id,
+                    }, 200
+                except Exception as exc:
+                    logger.error("Python execution failed", exc_info=True)
+                    return {"error": str(exc), "request_id": request_id}, 500
+                finally:
+                    _safe_remove(py_file)
+                    _prepare_shared_methods_directory(methods_dir)
+                    if dependency_mutation:
+                        _prepare_shared_dependencies_directory(dependencies_dir)
 
         payload, status = _execute_idempotently(workdir, "python", request_id, fingerprint, operation)
         return jsonify(payload), status

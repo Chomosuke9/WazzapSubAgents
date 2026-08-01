@@ -6,6 +6,7 @@ This directory contains specialized instructions for document, media, research, 
 
 | Folder | Description |
 |--------|-------------|
+| [create-method](./create-method) | Convert an objectively validated successful procedure into one safe, reusable method under `/methods/`, or repair a stale method after revalidation. |
 | [canvas-design](./canvas-design) | Instructions for creating high-quality visual designs, posters, and art as PDFs or PNGs using `reportlab` and `Pillow`. |
 | [document-converter](./document-converter) | Universal document format conversion (PDF, DOCX, XLSX, PPTX, etc.) using LibreOffice in headless mode. |
 | [docx](./docx) | Comprehensive guide for creating and editing Word documents (.docx) using Node.js (`docx`) and Python (`python-docx`). |

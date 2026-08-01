@@ -104,14 +104,14 @@ ENV NODE_PATH=/usr/lib/node_modules
 
 
 
-# Copy application code
-COPY src/ ./src/
-COPY main.py .
-COPY skills/ /skills/
+# Copy only the sandbox server. Host API/LLM modules never enter this image.
+RUN mkdir -p /app/src
+COPY src/__init__.py ./src/__init__.py
+COPY src/executor_server.py ./src/executor_server.py
+COPY src/logger.py ./src/logger.py
+COPY src/tool_environment.py ./src/tool_environment.py
 
-EXPOSE 5000 5001
+EXPOSE 5001
 
-# Two entry points (via CMD arg):
-# - python main.py (main service)
-# - python -m src.executor_server (in-container executor)
-CMD ["python", "main.py"]
+# The main API always runs on the host. This image is only the tool sandbox.
+CMD ["python", "-m", "src.executor_server"]

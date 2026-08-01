@@ -3,14 +3,16 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
-from urllib.parse import urlsplit
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 
 from src.logger import get_logger
-from src.runtime_paths import PROJECT_ROOT, workdir_base
+from src.runtime_paths import (
+    PROJECT_ROOT,
+    SANDBOX_WORKDIR_BASE as DEFAULT_SANDBOX_WORKDIR_BASE,
+    workdir_base,
+)
 from src.tool_environment import parse_tool_env_passthrough
 
 logger = get_logger(__name__)
@@ -18,6 +20,7 @@ logger = get_logger(__name__)
 
 class DockerManager:
     SOURCE_LABEL = "io.wazzapagents.executor-source-sha256"
+    SANDBOX_WORKDIR_BASE = DEFAULT_SANDBOX_WORKDIR_BASE
 
     def __init__(
         self,
@@ -25,7 +28,6 @@ class DockerManager:
         dockerfile_path: str = ".",
         container_name: str = "executor-executor",
         container_port: int = 5001,
-        executor_url: Optional[str] = None,
     ):
         self.project_root = PROJECT_ROOT
         self.image_name = image_name
@@ -34,12 +36,11 @@ class DockerManager:
         )
         self.container_name = os.getenv("EXECUTOR_CONTAINER_NAME", container_name)
         self.container_port = container_port
-        self.executor_url = (
-            executor_url or f"http://127.0.0.1:{self.container_port}"
-        ).rstrip("/")
-        self.host_port = urlsplit(self.executor_url).port or self.container_port
+        self.host_port = self.container_port
+        self.executor_url = f"http://127.0.0.1:{self.host_port}"
+        self.host_workdir_base = workdir_base()
         try:
-            self.client = docker.DockerClient(base_url="unix://var/run/docker.sock")
+            self.client = docker.from_env()
             self.client.ping()
         except DockerException as e:
             logger.error("Docker daemon not available", extra={"error": str(e)})
@@ -49,15 +50,16 @@ class DockerManager:
         """Hash executor source that is copied into the managed image.
 
         A fixed image tag alone is not enough: otherwise a source update keeps
-        talking to an old sidecar until an operator manually rebuilds it.
+        talking to an old sandbox until an operator manually rebuilds it.
         """
         digest = hashlib.sha256()
         roots = [
+            self.project_root / ".dockerignore",
             self.project_root / "Dockerfile",
-            self.project_root / "requirements.txt",
-            self.project_root / "main.py",
-            self.project_root / "src",
-            self.project_root / "skills",
+            self.project_root / "src" / "__init__.py",
+            self.project_root / "src" / "executor_server.py",
+            self.project_root / "src" / "logger.py",
+            self.project_root / "src" / "tool_environment.py",
         ]
         files: list[Path] = []
         for root in roots:
@@ -144,42 +146,35 @@ class DockerManager:
             except docker.errors.NotFound:
                 pass
 
-            # Native mode: the bridge writes to the same `WORKDIR_BASE`
-            # path the executor sidecar reads from, so we MUST bind-mount
-            # `WORKDIR_BASE` host→container at the identical path.
-            # Otherwise:
-            #   - SessionManager creates dirs at /tmp/work/<id> on the host,
-            #   - the executor sidecar runs bash with cwd /tmp/work/<id>
-            #     inside the container,
-            # and unless those map to the same on-disk dir, output files
-            # end up in the wrong place and `_collect_output_files()`
-            # finds nothing.
-            #
-            # Mount only the per-session workdir tree. The main service copies
-            # accepted inputs into each workdir, so the executor never needs
-            # visibility into the parent's raw /storage staging tree.
-            resolved_workdir_base = workdir_base()
+            # The API runs on the host, so its filesystem path can be Windows
+            # or Linux. Always translate that host path to one fixed Linux path
+            # inside the sandbox. Session IDs provide the shared suffix.
+            resolved_workdir_base = self.host_workdir_base
 
             os.makedirs(resolved_workdir_base, exist_ok=True)
             volumes = {
                 resolved_workdir_base: {
-                    "bind": resolved_workdir_base,
+                    "bind": self.SANDBOX_WORKDIR_BASE,
                     "mode": "rw",
                 },
             }
 
-            # Project code and skills — read-only, agent must never modify these
+            # Repository-backed runtime knowledge. Skills stay read-only while
+            # successful procedures persist through the read-write methods mount.
             project_root = str(self.project_root)
             skills_dir = os.path.join(project_root, "skills")
-            src_dir = os.path.join(project_root, "src")
-            main_py = os.path.join(project_root, "main.py")
+            methods_dir = os.path.join(project_root, "methods")
+            dependencies_dir = os.path.join(project_root, "dependencies")
 
             if os.path.isdir(skills_dir):
                 volumes[skills_dir] = {"bind": "/skills", "mode": "ro"}
-            if os.path.isdir(src_dir):
-                volumes[src_dir] = {"bind": "/app/src", "mode": "ro"}
-            if os.path.isfile(main_py):
-                volumes[main_py] = {"bind": "/app/main.py", "mode": "ro"}
+            if os.path.isdir(methods_dir):
+                volumes[methods_dir] = {"bind": "/methods", "mode": "rw"}
+            if os.path.isdir(dependencies_dir):
+                volumes[dependencies_dir] = {
+                    "bind": "/dependencies",
+                    "mode": "rw",
+                }
 
             tool_env_names = parse_tool_env_passthrough()
             container_environment = {
@@ -189,7 +184,9 @@ class DockerManager:
             # parser changes cannot let a passthrough value override them.
             container_environment.update({
                 "FLASK_PORT": str(self.container_port),
-                "WORKDIR_BASE": resolved_workdir_base,
+                "WORKDIR_BASE": self.SANDBOX_WORKDIR_BASE,
+                "METHODS_DIR": "/methods",
+                "DEPENDENCIES_DIR": "/dependencies",
                 "EXECUTOR_REQUIRE_UID_ISOLATION": "1",
                 "EXECUTOR_PARENT_UID": str(
                     os.getuid() if hasattr(os, "getuid") else 0
@@ -203,7 +200,6 @@ class DockerManager:
             self.client.containers.run(
                 self.image_name,
                 name=self.container_name,
-                command=["python", "-m", "src.executor_server"],
                 detach=True,
                 ports={f"{self.container_port}/tcp": ("127.0.0.1", self.host_port)},
                 environment=container_environment,
@@ -216,7 +212,8 @@ class DockerManager:
                 "Container started",
                 extra={
                     "container": self.container_name,
-                    "workdir_base": resolved_workdir_base,
+                    "host_workdir_base": resolved_workdir_base,
+                    "sandbox_workdir_base": self.SANDBOX_WORKDIR_BASE,
                     "volumes": list(volumes.keys()),
                 },
             )

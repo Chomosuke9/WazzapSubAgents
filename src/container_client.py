@@ -72,7 +72,7 @@ class ContainerClient:
         url = f"{self.base_url}{endpoint}"
         restarted = False
         # A stable id makes a retry safe even if the executor finished the
-        # command but its HTTP response was lost. The sidecar caches the first
+        # command but its HTTP response was lost. The sandbox caches the first
         # result for this id and never runs the command twice.
         payload = {**payload}
         payload.setdefault("request_id", uuid.uuid4().hex)

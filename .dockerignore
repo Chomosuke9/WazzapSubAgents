@@ -9,7 +9,16 @@ __pycache__/
 .ruff_cache/
 *.pyc
 tests/
+main.py
+src/*
+!src/__init__.py
+!src/executor_server.py
+!src/logger.py
+!src/tool_environment.py
 storage/
 data/
 subagent_work/
 .subagent_uploads/
+skills/
+methods/
+dependencies/

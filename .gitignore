@@ -11,3 +11,6 @@ build/
 venv/
 *.log
 .DS_Store
+dependencies/*
+!dependencies/.dependencies-root
+!dependencies/README.md

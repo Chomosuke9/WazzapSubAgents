@@ -18,6 +18,7 @@ from src.config import config
 from src.container_client import ContainerClient
 from src.logger import get_logger
 from src.prompts import build_executor_system_prompt
+from src.runtime_paths import host_path_to_sandbox, sandbox_path_to_host
 from src.secrets_redaction import redact_secrets, secret_values
 from src.session_manager import SessionManager
 
@@ -518,13 +519,19 @@ class ExecutorAgent:
         seen: set[str] = set()
         for raw_path in declared:
             try:
+                try:
+                    translated = sandbox_path_to_host(
+                        raw_path, host_base=os.path.dirname(workdir_real)
+                    )
+                except ValueError:
+                    translated = raw_path
                 # Skills commonly declare ``./report.pdf``. Tool execution
                 # happens in the session workdir, so resolve relative output
                 # paths against that same directory rather than the main
                 # service process cwd.
                 candidate = (
-                    raw_path if os.path.isabs(raw_path)
-                    else os.path.join(workdir_real, raw_path)
+                    translated if os.path.isabs(translated)
+                    else os.path.join(workdir_real, translated)
                 )
                 if os.path.islink(candidate):
                     skipped.append({"path": raw_path, "reason": "symlink_not_allowed"})
@@ -908,9 +915,15 @@ class ExecutorAgent:
                 "previous_session_id": previous_session_id,
             },
         )
+        host_workdir_base = os.path.dirname(os.path.realpath(workdir))
+        sandbox_workdir = host_path_to_sandbox(workdir, host_base=host_workdir_base)
+        sandbox_input_files = [
+            host_path_to_sandbox(path, host_base=host_workdir_base)
+            for path in input_files
+        ]
 
         messages: List[Any] = [
-            SystemMessage(content=self._build_system_prompt(workdir)),
+            SystemMessage(content=self._build_system_prompt(sandbox_workdir)),
         ]
 
         # If this is a correction re-dispatch, carry forward the previous
@@ -950,8 +963,8 @@ class ExecutorAgent:
                     },
                 )
 
-        if input_files:
-            files_block = "\n".join(f"- {p}" for p in input_files)
+        if sandbox_input_files:
+            files_block = "\n".join(f"- {p}" for p in sandbox_input_files)
             instruction = (
                 f"{instruction}\n\n"
                 "[NEW INPUT FILES — provided with this task, "

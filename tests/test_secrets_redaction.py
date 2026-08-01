@@ -18,7 +18,7 @@ def test_configured_skill_keys_are_redacted_without_env_files(tmp_path, monkeypa
         "https://router.example.test"
     )
 
-    assert value == "[REDACTED] [REDACTED] [REDACTED] https://router.example.test"
+    assert value == "[REDACTED] [REDACTED] [REDACTED] [REDACTED]"
     secrets_redaction._pattern = None
 
 

@@ -20,9 +20,9 @@ TOOL_ENV_BLOCKLIST = frozenset({
     "SUBAGENT_WEBHOOK_TOKEN",
 })
 
-# Non-secret values may be exposed to tools but must not be treated as secret
-# material by the main service's output redaction layer.
-TOOL_ENV_NON_SECRET = frozenset({"NINEROUTER_URL"})
+# Every skill value forwarded from .env.secrets is treated as sensitive,
+# including service URLs that may reveal private infrastructure.
+TOOL_ENV_NON_SECRET = frozenset()
 
 _RESERVED_PREFIXES = ("AGENT_", "EXECUTOR_", "LLM_", "SUBAGENT_")
 _RESERVED_NAMES = frozenset({"FLASK_PORT", "WORKDIR_BASE"})

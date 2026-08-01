@@ -15,9 +15,9 @@ This is applied to all tool output and ``end_task`` reports before they
 are fed back to the LLM, preventing accidental key leakage.
 
 **Architecture note — why we also scan ``os.environ``:**
-The sidecar container (executor-executor) never receives ``LLM_API_KEY`` —
+The Docker sandbox (executor-executor) never receives ``LLM_API_KEY`` —
 only the main service (executor-service) loads ``LLM_API_KEY`` from ``.env``
-because it runs the LLM agent loop.  The sidecar gets only skill-specific
+because it runs the LLM agent loop. The sandbox gets only skill-specific
 keys like ``BRAVE_SEARCH_API_KEY`` as explicit env vars, so the LLM cannot
 ``echo $LLM_API_KEY`` inside a bash command.  However, the main service
 processes tool output *before* feeding it back to the LLM, and that output
@@ -113,9 +113,9 @@ def _discover_secret_keys() -> Set[str]:
     (git-ignored) may contain additional keys added by the deployer.
     """
     root = _find_project_root()
-    # The env files are not present inside production containers: Compose's
-    # env_file injects values without mounting the file. Treat every configured
-    # passthrough as secret unless it is explicitly classified as public.
+    # The env files are not copied into the sandbox image. The host injects
+    # allowlisted values only. Treat every configured passthrough as secret
+    # unless it is explicitly classified as public.
     keys: Set[str] = {
         name
         for name in parse_tool_env_passthrough()

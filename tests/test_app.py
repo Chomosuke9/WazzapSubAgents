@@ -389,7 +389,8 @@ def test_steer_stages_base64_files_into_workdir_and_lists_them(tmp_path, monkeyp
     msgs = sm.consume_steering_messages("steer-files")
     assert len(msgs) == 1
     assert "use this new file" in msgs[0]
-    assert "note.txt" in msgs[0]
+    assert "/storage/subagent_work/steer-files/input/note.txt" in msgs[0]
+    assert session.workdir not in msgs[0]
     sm.cleanup_session("steer-files")
 
 

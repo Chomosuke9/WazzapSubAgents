@@ -14,8 +14,8 @@ class TestDockerManagerInit:
 
     def test_init_hard_error_if_docker_unavailable(self, monkeypatch):
         monkeypatch.setattr(
-            "docker.DockerClient",
-            lambda **kwargs: (_ for _ in ()).throw(DockerException("no docker")),
+            "docker.from_env",
+            lambda: (_ for _ in ()).throw(DockerException("no docker")),
         )
         with pytest.raises(RuntimeError, match="Docker daemon not available"):
             DockerManager()
@@ -93,8 +93,25 @@ class TestStartContainer:
 
         kwargs = mock_docker_client.containers.run.call_args.kwargs
         expected = str((PROJECT_ROOT / ".runtime" / "subagent_work").resolve())
-        assert kwargs["environment"]["WORKDIR_BASE"] == expected
-        assert kwargs["volumes"][expected]["bind"] == expected
+        assert kwargs["environment"]["WORKDIR_BASE"] == "/storage/subagent_work"
+        assert kwargs["environment"]["METHODS_DIR"] == "/methods"
+        assert kwargs["environment"]["DEPENDENCIES_DIR"] == "/dependencies"
+        assert kwargs["volumes"][expected] == {
+            "bind": "/storage/subagent_work",
+            "mode": "rw",
+        }
+        skills = str(PROJECT_ROOT / "skills")
+        methods = str(PROJECT_ROOT / "methods")
+        dependencies = str(PROJECT_ROOT / "dependencies")
+        assert kwargs["volumes"][skills] == {"bind": "/skills", "mode": "ro"}
+        assert kwargs["volumes"][methods] == {"bind": "/methods", "mode": "rw"}
+        assert kwargs["volumes"][dependencies] == {
+            "bind": "/dependencies",
+            "mode": "rw",
+        }
+        assert "command" not in kwargs
+        assert str(PROJECT_ROOT / "src") not in kwargs["volumes"]
+        assert str(PROJECT_ROOT / "main.py") not in kwargs["volumes"]
 
     def test_forwards_only_allowed_skill_env_and_host_gateway(
         self, mock_docker_client, monkeypatch, tmp_path
@@ -140,3 +157,25 @@ class TestBuildImage:
         dm = DockerManager()
         with pytest.raises(Exception):
             dm.build_image()
+
+
+def test_source_fingerprint_ignores_live_mounted_knowledge(mock_docker_client, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "methods").mkdir()
+    (tmp_path / "dependencies").mkdir()
+    (tmp_path / "src" / "executor_server.py").write_text("version = 1", encoding="utf-8")
+    (tmp_path / "skills" / "SKILL.md").write_text("first", encoding="utf-8")
+    (tmp_path / "methods" / "example.md").write_text("first", encoding="utf-8")
+    (tmp_path / "dependencies" / "package.txt").write_text("first", encoding="utf-8")
+
+    dm = DockerManager()
+    dm.project_root = tmp_path
+    initial = dm.source_fingerprint()
+    (tmp_path / "skills" / "SKILL.md").write_text("second", encoding="utf-8")
+    (tmp_path / "methods" / "example.md").write_text("second", encoding="utf-8")
+    (tmp_path / "dependencies" / "package.txt").write_text("second", encoding="utf-8")
+    assert dm.source_fingerprint() == initial
+
+    (tmp_path / "src" / "executor_server.py").write_text("version = 2", encoding="utf-8")
+    assert dm.source_fingerprint() != initial

@@ -86,6 +86,68 @@ def test_execute_ends_on_end_task(mock_llm_class):
 
 
 @patch("src.agent.ChatOpenAI")
+def test_execute_shows_only_sandbox_paths_to_the_llm(mock_llm_class, tmp_path):
+    client = MagicMock()
+    sm = MagicMock()
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = _make_response([_end_tc(True, "Done")])
+    mock_llm_class.return_value.bind_tools.return_value = mock_llm
+    workdir = tmp_path / "work" / "path-session"
+    input_file = workdir / "input" / "document.pdf"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"pdf")
+
+    ExecutorAgent(client, sm).execute(
+        "path-session",
+        "read the document",
+        [str(input_file)],
+        str(workdir),
+    )
+
+    messages = mock_llm.invoke.call_args.args[0]
+    assert "Workdir: /storage/subagent_work/path-session" in messages[0].content
+    assert "/storage/subagent_work/path-session/input/document.pdf" in messages[1].content
+    assert str(workdir) not in messages[0].content
+    assert str(input_file) not in messages[1].content
+
+
+@patch("src.agent.ChatOpenAI")
+def test_execute_translates_staged_steering_paths(mock_llm_class, tmp_path):
+    client = MagicMock()
+    sm = MagicMock()
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = _make_response([_end_tc(True, "Done")])
+    mock_llm_class.return_value.bind_tools.return_value = mock_llm
+    workdir = tmp_path / "work" / "steering-path"
+    steered_file = workdir / "input" / "new.txt"
+    steered_file.parent.mkdir(parents=True)
+    steered_file.write_text("new", encoding="utf-8")
+    sm.consume_steering_messages.side_effect = [
+        [
+            "read the new file:\n"
+            "- /storage/subagent_work/steering-path/input/new.txt"
+        ],
+        [],
+    ]
+    sm.try_begin_completion.return_value = True
+
+    ExecutorAgent(client, sm).execute(
+        "steering-path", "wait for steering", [], str(workdir)
+    )
+
+    messages = mock_llm.invoke.call_args.args[0]
+    steering_messages = [
+        message.content
+        for message in messages
+        if isinstance(message, HumanMessage) and "read the new file" in message.content
+    ]
+    assert steering_messages == [
+        "[STEERING INSTRUCTION]: read the new file:\n"
+        "- /storage/subagent_work/steering-path/input/new.txt"
+    ]
+
+
+@patch("src.agent.ChatOpenAI")
 def test_execute_max_iterations(mock_llm_class):
     client = MagicMock()
     sm = MagicMock()
@@ -306,6 +368,38 @@ def test_resolve_declared_output_files_resolves_relative_to_workdir(tmp_path):
     )
 
     assert accepted == [str(deliverable.resolve())]
+
+
+def test_resolve_declared_output_files_translates_sandbox_absolute_path(tmp_path):
+    workdir = tmp_path / "work" / "sandbox-output"
+    workdir.mkdir(parents=True)
+    deliverable = workdir / "report.pdf"
+    deliverable.write_bytes(b"%PDF-sandbox")
+
+    accepted = _make_resolver_agent()._resolve_declared_output_files(
+        str(workdir),
+        ["/storage/subagent_work/sandbox-output/report.pdf"],
+        session_id="sandbox-output",
+    )
+
+    assert accepted == [str(deliverable.resolve())]
+
+
+def test_resolve_declared_output_files_rejects_other_sandbox_session(tmp_path):
+    work_root = tmp_path / "work"
+    workdir = work_root / "current-session"
+    other = work_root / "other-session"
+    workdir.mkdir(parents=True)
+    other.mkdir()
+    (other / "secret.txt").write_text("private", encoding="utf-8")
+
+    accepted = _make_resolver_agent()._resolve_declared_output_files(
+        str(workdir),
+        ["/storage/subagent_work/other-session/secret.txt"],
+        session_id="current-session",
+    )
+
+    assert accepted == []
 
 
 def test_resolve_declared_output_files_allows_input_paths(tmp_path):

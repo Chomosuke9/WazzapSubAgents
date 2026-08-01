@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import sys
 from unittest.mock import patch
 
@@ -9,8 +10,12 @@ from src.executor_server import (
     MAX_OUTPUT_BYTES,
     MAX_TIMEOUT,
     _clamp_timeout,
+    _may_modify_dependencies,
+    _prepare_shared_dependencies_directory,
+    _prepare_shared_methods_directory,
     _run_bounded,
     _safe_remove,
+    _write_session_script,
     create_executor_app,
 )
 
@@ -76,6 +81,61 @@ def test_python_valid_session_id(client):
     assert os.path.isdir(os.path.join(base, "abc"))
 
 
+def test_session_script_is_assigned_to_the_isolated_uid(tmp_path, monkeypatch):
+    script = tmp_path / "script.py"
+    ownership: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, uid, gid: ownership.append((path, uid, gid)),
+        raising=False,
+    )
+
+    _write_session_script(
+        str(script),
+        "print('ok')\n",
+        {"user": 123456, "group": 123456},
+    )
+
+    assert script.read_text(encoding="utf-8") == "print('ok')\n"
+    assert ownership == [(str(script), 123456, 123456)]
+    if os.name != "nt":
+        assert script.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(
+    os.name == "nt"
+    or not hasattr(os, "geteuid")
+    or os.geteuid() != 0
+    or shutil.which("setfacl") is None,
+    reason="Regression requires a root Linux runner with POSIX ACL support",
+)
+def test_python_and_javascript_run_with_non_root_parent_acl(tmp_path, monkeypatch):
+    import src.executor_server as executor_module
+
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    monkeypatch.setattr(executor_module, "REQUIRE_UID_ISOLATION", True)
+    monkeypatch.setattr(executor_module, "EXECUTOR_PARENT_UID", 12345)
+    client = create_executor_app().test_client()
+
+    python_response = client.post(
+        "/python",
+        json={"code": "print('python-ok')", "session_id": "acl-regression"},
+    )
+    assert python_response.status_code == 200, python_response.data
+    assert python_response.get_json()["returncode"] == 0
+    assert python_response.get_json()["stdout"].strip() == "python-ok"
+
+    if shutil.which("node"):
+        javascript_response = client.post(
+            "/javascript",
+            json={"code": "console.log('javascript-ok')", "session_id": "acl-regression"},
+        )
+        assert javascript_response.status_code == 200, javascript_response.data
+        assert javascript_response.get_json()["returncode"] == 0
+        assert javascript_response.get_json()["stdout"].strip() == "javascript-ok"
+
+
 def test_execution_output_limit_does_not_limit_workdir_files(tmp_path):
     target = tmp_path / "large-output.bin"
     file_size = MAX_OUTPUT_BYTES + 1
@@ -96,6 +156,99 @@ def test_execution_output_limit_does_not_limit_workdir_files(tmp_path):
     assert returncode == 0
     assert failure is None
     assert target.stat().st_size == file_size
+
+
+def test_marked_methods_directory_is_accepted(tmp_path):
+    methods = tmp_path / "methods"
+    methods.mkdir()
+    (methods / ".methods-root").write_text(
+        "wazzapsubagents-methods-v1\n", encoding="utf-8"
+    )
+    (methods / "download-media.md").write_text("procedure", encoding="utf-8")
+
+    assert _prepare_shared_methods_directory(str(methods)) is True
+
+
+def test_unmarked_directory_is_not_repermissioned(tmp_path):
+    methods = tmp_path / "methods"
+    methods.mkdir()
+    (methods / "unrelated.md").write_text("do not touch", encoding="utf-8")
+    original_mode = methods.stat().st_mode
+
+    assert _prepare_shared_methods_directory(str(methods)) is False
+    assert methods.stat().st_mode == original_mode
+
+
+def test_marked_dependencies_directory_creates_runtime_layout(tmp_path):
+    dependencies = tmp_path / "dependencies"
+    dependencies.mkdir()
+    (dependencies / ".dependencies-root").write_text(
+        "wazzapsubagents-dependencies-v1\n", encoding="utf-8"
+    )
+
+    assert _prepare_shared_dependencies_directory(str(dependencies)) is True
+    assert {"python", "node", "bin", "cache"}.issubset(
+        {path.name for path in dependencies.iterdir() if path.is_dir()}
+    )
+
+
+def test_dependency_mutation_detection():
+    assert _may_modify_dependencies("pip install example==1.0") is True
+    assert _may_modify_dependencies("npm i example@1.0") is True
+    assert _may_modify_dependencies("write /dependencies/bin/tool") is True
+    assert _may_modify_dependencies("python report.py") is False
+
+
+def test_python_dependency_is_importable_by_a_later_session(tmp_path, monkeypatch):
+    dependencies = tmp_path / "dependencies"
+    dependencies.mkdir()
+    (dependencies / ".dependencies-root").write_text(
+        "wazzapsubagents-dependencies-v1\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("DEPENDENCIES_DIR", str(dependencies))
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    client = create_executor_app().test_client()
+    module_path = dependencies / "python" / "persistent_probe.py"
+
+    created = client.post(
+        "/python",
+        json={
+            "code": (
+                "# write to /dependencies\n"
+                "from pathlib import Path\n"
+                f"Path({str(module_path)!r}).write_text(\"VALUE = 'persisted'\\n\")"
+            ),
+            "session_id": "dependency-writer",
+        },
+    )
+    assert created.status_code == 200
+    assert created.get_json()["returncode"] == 0
+
+    reused = client.post(
+        "/python",
+        json={
+            "code": "import persistent_probe; print(persistent_probe.VALUE)",
+            "session_id": "dependency-reader",
+        },
+    )
+    assert reused.status_code == 200
+    assert reused.get_json()["returncode"] == 0
+    assert reused.get_json()["stdout"].strip() == "persisted"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are enforced in Docker")
+def test_method_docs_are_writable_across_isolated_uids(tmp_path):
+    methods = tmp_path / "methods"
+    methods.mkdir(mode=0o700)
+    marker = methods / ".methods-root"
+    marker.write_text("wazzapsubagents-methods-v1\n", encoding="utf-8")
+    method = methods / "download-media.md"
+    method.write_text("procedure", encoding="utf-8")
+    os.chmod(method, 0o600)
+
+    assert _prepare_shared_methods_directory(str(methods)) is True
+    assert methods.stat().st_mode & 0o777 == 0o777
+    assert method.stat().st_mode & 0o777 == 0o666
 
 
 def test_bash_respects_custom_timeout(client):
@@ -303,6 +456,16 @@ def test_executor_exposes_only_allowlisted_skill_environment(client, monkeypatch
     assert "LLM_API_KEY" not in environment
     assert environment["HOME"] == os.path.join(base, "env-boundary")
     assert environment["TMPDIR"] == os.path.join(base, "env-boundary", ".tmp")
+    assert environment["PYTHONPATH"] == os.path.join("/dependencies", "python")
+    assert environment["PIP_TARGET"] == os.path.join("/dependencies", "python")
+    assert environment["NODE_PATH"].split(os.pathsep)[0] == os.path.join(
+        "/dependencies", "node", "node_modules"
+    )
+    assert environment["PATH"].split(os.pathsep)[:3] == [
+        os.path.join("/dependencies", "bin"),
+        os.path.join("/dependencies", "python", "bin"),
+        os.path.join("/dependencies", "node", "node_modules", ".bin"),
+    ]
 
 
 @pytest.mark.skipif(
