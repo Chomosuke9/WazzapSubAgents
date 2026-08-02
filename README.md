@@ -58,6 +58,9 @@ Submit a task to the agent.
 {
   "session_id": "user_123_task_abc",
   "instruction": "Extract all tables from /storage/doc.pdf and save each as CSV in /tmp/work_user_123_task_abc/",
+  "callback_url": "http://parent:8081/subagent/callback",
+  "progress_webhook": "http://parent:8081/subagent/callback",
+  "callback_context": {"chat_id": "120363000000000000@g.us"},
   "input_files": [
     "/storage/doc.pdf",
     "/storage/config.json"
@@ -119,10 +122,19 @@ Poll for the final result.
 }
 ```
 
-**Important:** Results are **ephemeral** (in-memory only). They are lost when:
-- Session idle timeout expires (default: 7200s)
-- Service/container is restarted
-- WazzapAgents must poll before timeout
+**Important:** accepted sessions, results, output descriptors, and completion
+callback state are persisted under `SUBAGENT_STATE_DIR`. A restart resumes
+pending callback delivery. When the receiver returns JSON with
+`"retryable": false`, delivery moves to dead-letter state instead of retrying
+forever.
+
+Authenticated operators can inspect and manage retained callbacks:
+
+- `GET /callbacks/outbox` lists path-free pending/dead-letter diagnostics;
+- `POST /callbacks/<session_id>/retry` immediately requeues a retained result;
+- `POST /callbacks/<session_id>/discard` stops delivery and removes only the
+  callback envelope. The result and output files remain retained until normal
+  idle cleanup.
 
 ---
 
@@ -171,24 +183,25 @@ else:
 POST /execute
     |
     v
-Session created  -->  Agent loop runs (bash/python tools)
+Durable session created  -->  Agent loop runs (bash/python tools)
     |                       |
     |                       v
     |               end_task called
     |                       |
     |                       v
-    |               Result stored in-memory
+    |               Result + callback state stored durably
     |                       |
     |<----------------------+
     |
 GET /sessions/<id>/result  <--  WazzapAgents polls
     |
     v
-Idle timeout reached  -->  Result deleted + workdir cleaned
+Confirmed callback + idle timeout  -->  Result/workdir cleaned
 ```
 
 - Container stays running (long-lived)
-- Only session result & workdir are ephemeral
+- Pending and dead-letter callbacks are excluded from idle cleanup; discarded
+  callbacks receive a fresh idle-retention window
 
 ---
 

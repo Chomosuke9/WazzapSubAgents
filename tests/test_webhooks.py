@@ -3,6 +3,7 @@ Quick integration test for webhook push notification feature.
 No external HTTP server needed -- we monkeypatch _fire_webhook to collect payloads.
 """
 import time
+import os
 from unittest.mock import MagicMock, patch
 
 import requests as req_module
@@ -10,6 +11,17 @@ import requests as req_module
 import src.session_manager as sm_module
 
 from src.session_manager import SessionManager
+
+
+class SyncThread:
+    """Run webhook delivery inline so assertions see the terminal state."""
+
+    def __init__(self, target=None, daemon=None, **_kwargs):
+        self._target = target
+
+    def start(self):
+        if self._target:
+            self._target()
 
 
 def test_webhook_flow():
@@ -72,6 +84,115 @@ def test_no_crash_on_bad_webhook():
     sm.store_result("test-session-3", {"success": True, "report": "done"})
     time.sleep(0.3)
     print("No crash on bad webhook: OK")
+
+
+def test_terminal_callback_rejection_moves_to_dead_letter_and_survives_restart(
+    tmp_path, monkeypatch,
+):
+    state = tmp_path / "state"
+    work = tmp_path / "work"
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(state))
+    monkeypatch.setenv("WORKDIR_BASE", str(work))
+    monkeypatch.setattr(sm_module, "_WEBHOOK_RETRY_MAX", 5)
+    response = MagicMock()
+    response.status_code = 422
+    response.json.return_value = {
+        "status": "invalid_output",
+        "retryable": False,
+    }
+    response.raise_for_status.side_effect = req_module.exceptions.HTTPError("422")
+
+    manager = SessionManager(idle_timeout=60)
+    with patch("src.session_manager.threading.Thread", SyncThread), patch(
+        "src.session_manager.requests.post", return_value=response,
+    ) as post:
+        manager.get_or_create("terminal-rejection")
+        manager.set_callback(
+            "terminal-rejection",
+            "http://callback.invalid/complete",
+            None,
+            {"chat_id": "chat@g.us"},
+        )
+        manager.store_result(
+            "terminal-rejection",
+            {"success": True, "report": "done", "output_files": []},
+        )
+
+    assert post.call_count == 1
+    entry = manager.list_callback_outbox()[0]
+    assert entry["state"] == "dead_letter"
+    assert entry["callback_status"] == 422
+    assert "invalid_output" in entry["callback_error"]
+    assert os.listdir(manager._outbox_dir) == []
+    assert len(os.listdir(manager._dead_letter_dir)) == 1
+
+    restarted = SessionManager(idle_timeout=60)
+    recovered = restarted.get_session("terminal-rejection")
+    assert recovered is not None
+    assert recovered.callback_context == {"chat_id": "chat@g.us"}
+    assert recovered._callback_dead_letter is True
+    assert recovered._callback_pending is False
+    assert restarted.list_callback_outbox()[0]["state"] == "dead_letter"
+
+
+def test_manual_retry_delivers_dead_letter_and_clears_outbox(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    manager = SessionManager(idle_timeout=60)
+    terminal = MagicMock(status_code=422)
+    terminal.json.return_value = {"status": "invalid_output", "retryable": False}
+    success = MagicMock(status_code=200)
+    success.json.return_value = {"status": "ok"}
+    success.raise_for_status.return_value = None
+
+    with patch("src.session_manager.threading.Thread", SyncThread), patch(
+        "src.session_manager.requests.post", return_value=terminal,
+    ):
+        manager.get_or_create("retry-dead-letter")
+        manager.set_callback("retry-dead-letter", "http://callback/complete", None)
+        manager.store_result(
+            "retry-dead-letter",
+            {"success": True, "report": "done", "output_files": []},
+        )
+    assert manager.list_callback_outbox()[0]["state"] == "dead_letter"
+
+    with patch("src.session_manager.threading.Thread", SyncThread), patch(
+        "src.session_manager.requests.post", return_value=success,
+    ) as post:
+        manager.retry_callback("retry-dead-letter")
+
+    assert post.call_count == 1
+    session = manager.get_session("retry-dead-letter")
+    assert session is not None and session._callback_sent is True
+    assert manager.list_callback_outbox() == []
+    assert not os.path.exists(manager._outbox_path(manager._completion_payload(session)))
+    assert not os.path.exists(manager._dead_letter_path(manager._completion_payload(session)))
+
+
+def test_discard_stops_pending_callback_without_deleting_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUBAGENT_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("WORKDIR_BASE", str(tmp_path / "work"))
+    monkeypatch.setattr(sm_module, "_WEBHOOK_RETRY_MAX", 1)
+    manager = SessionManager(idle_timeout=60)
+
+    with patch("src.session_manager.threading.Thread", SyncThread), patch(
+        "src.session_manager.requests.post", side_effect=OSError("offline"),
+    ):
+        manager.get_or_create("discard-pending")
+        manager.set_callback("discard-pending", "http://callback/complete", None)
+        manager.store_result(
+            "discard-pending",
+            {"success": True, "report": "retained", "output_files": []},
+        )
+
+    assert manager.list_callback_outbox()[0]["state"] == "pending"
+    discarded = manager.discard_callback("discard-pending")
+    session = manager.get_session("discard-pending")
+    assert discarded["state"] == "discarded"
+    assert session is not None and session.result["report"] == "retained"
+    assert session.callback_result["report"] == "retained"
+    assert manager.list_callback_outbox() == []
+    assert os.listdir(manager._outbox_dir) == []
 
 
 def test_polling_unchanged():

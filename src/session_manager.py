@@ -210,6 +210,7 @@ class Session:
     workdir: str
     callback_url: str | None = None
     progress_webhook: str | None = None
+    callback_context: dict[str, Any] = field(default_factory=dict)
     progress_logs: list[dict] = field(default_factory=list)
     last_activity: float = field(default_factory=time.time)
     status: str = "active"
@@ -221,6 +222,11 @@ class Session:
     run_started: bool = False
     _callback_sent: bool = field(default=False, repr=False)
     _callback_pending: bool = field(default=False, repr=False)
+    _callback_dead_letter: bool = field(default=False, repr=False)
+    _callback_discarded: bool = field(default=False, repr=False)
+    _callback_last_status: int | None = field(default=None, repr=False)
+    _callback_last_error: str | None = field(default=None, repr=False)
+    _callback_dead_lettered_at: float | None = field(default=None, repr=False)
     steering_messages: list[SteeringEnvelope] = field(default_factory=list)
     messages: Optional[list] = None
     event_sequence: int = 0
@@ -242,6 +248,7 @@ class SessionManager:
             os.getenv("SUBAGENT_STATE_DIR", os.path.join(self._workdir_base, ".state"))
         )
         self._outbox_dir = os.path.join(self._state_dir, "outbox")
+        self._dead_letter_dir = os.path.join(self._state_dir, "dead_letter")
         self._deliveries_inflight: set[tuple[str, int, str]] = set()
         self._workdir_owners: dict[str, str] = {}
         self._blocked_session_ids: set[str] = set()
@@ -279,6 +286,7 @@ class SessionManager:
             "workdir": session.workdir,
             "callback_url": session.callback_url,
             "progress_webhook": session.progress_webhook,
+            "callback_context": session.callback_context,
             "last_activity": session.last_activity,
             "status": session.status,
             "result": session.result,
@@ -289,6 +297,11 @@ class SessionManager:
             "run_started": session.run_started,
             "callback_sent": session._callback_sent,
             "callback_pending": session._callback_pending,
+            "callback_dead_letter": session._callback_dead_letter,
+            "callback_discarded": session._callback_discarded,
+            "callback_last_status": session._callback_last_status,
+            "callback_last_error": session._callback_last_error,
+            "callback_dead_lettered_at": session._callback_dead_lettered_at,
             "steering_messages": [asdict(item) for item in session.steering_messages],
             "messages": session.messages,
             "event_sequence": session.event_sequence,
@@ -322,7 +335,14 @@ class SessionManager:
                 if os.path.realpath(value.get("workdir", "")) != expected_workdir:
                     raise ValueError("persisted workdir does not match canonical session path")
                 steering = [SteeringEnvelope(**item) for item in value.get("steering_messages", [])]
-                pending_callback = bool(value.get("callback_pending")) and not bool(value.get("callback_sent"))
+                dead_letter = bool(value.get("callback_dead_letter"))
+                discarded = bool(value.get("callback_discarded"))
+                pending_callback = (
+                    bool(value.get("callback_pending"))
+                    and not bool(value.get("callback_sent"))
+                    and not dead_letter
+                    and not discarded
+                )
                 event_sequence = int(value.get("event_sequence", 0))
                 callback_sequence = int(value.get("callback_sequence", 0))
                 if pending_callback and callback_sequence <= 0:
@@ -339,6 +359,11 @@ class SessionManager:
                     workdir=expected_workdir,
                     callback_url=value.get("callback_url"),
                     progress_webhook=value.get("progress_webhook"),
+                    callback_context=(
+                        dict(value.get("callback_context"))
+                        if isinstance(value.get("callback_context"), dict)
+                        else {}
+                    ),
                     last_activity=float(value.get("last_activity", time.time())),
                     status=value.get("status", "active"),
                     result=value.get("result"),
@@ -348,7 +373,24 @@ class SessionManager:
                     request_manifest=value.get("request_manifest") or {},
                     run_started=bool(value.get("run_started")),
                     _callback_sent=bool(value.get("callback_sent")),
-                    _callback_pending=bool(value.get("callback_pending")),
+                    _callback_pending=pending_callback,
+                    _callback_dead_letter=dead_letter,
+                    _callback_discarded=discarded,
+                    _callback_last_status=(
+                        int(value["callback_last_status"])
+                        if isinstance(value.get("callback_last_status"), int)
+                        else None
+                    ),
+                    _callback_last_error=(
+                        str(value["callback_last_error"])[:1000]
+                        if value.get("callback_last_error") is not None
+                        else None
+                    ),
+                    _callback_dead_lettered_at=(
+                        float(value["callback_dead_lettered_at"])
+                        if value.get("callback_dead_lettered_at") is not None
+                        else None
+                    ),
                     steering_messages=steering,
                     messages=value.get("messages"),
                     event_sequence=event_sequence,
@@ -485,12 +527,19 @@ class SessionManager:
             self._persist_session_locked(session)
             return True
 
-    def set_callback(self, session_id: str, callback_url: Optional[str], progress_webhook: Optional[str]) -> None:
+    def set_callback(
+        self,
+        session_id: str,
+        callback_url: Optional[str],
+        progress_webhook: Optional[str],
+        callback_context: dict[str, Any] | None = None,
+    ) -> None:
         with self._lock:
             session = self._sessions.get(session_id)
             if session:
                 session.callback_url = callback_url
                 session.progress_webhook = progress_webhook
+                session.callback_context = dict(callback_context or {})
                 self._persist_session_locked(session)
 
     def _next_event_locked(self, session: Session, payload: dict[str, Any]) -> dict[str, Any]:
@@ -576,14 +625,27 @@ class SessionManager:
             session.callback_result = self._build_delivery_result(session, result)
             session.last_activity = time.time()
             session.status = "completed"
-            if session.callback_url and not session._callback_sent and not session._callback_pending:
+            if (
+                session.callback_url
+                and not session._callback_sent
+                and not session._callback_pending
+                and not session._callback_dead_letter
+                and not session._callback_discarded
+            ):
                 session._callback_pending = True
+                session._callback_last_status = None
+                session._callback_last_error = None
                 payload = self._next_event_locked(
                     session,
                     {
                         "type": "complete",
                         "session_id": session_id,
                         "result": session.callback_result,
+                        **(
+                            {"context": session.callback_context}
+                            if session.callback_context
+                            else {}
+                        ),
                     },
                 )
                 session.callback_sequence = int(payload["sequence"])
@@ -626,6 +688,25 @@ class SessionManager:
             f"{payload.get('session_id')}-{int(payload.get('sequence', 0)):020d}.json",
         )
 
+    def _dead_letter_path(self, payload: dict[str, Any]) -> str:
+        return os.path.join(
+            self._dead_letter_dir,
+            f"{payload.get('session_id')}-{int(payload.get('sequence', 0)):020d}.json",
+        )
+
+    @staticmethod
+    def _completion_payload(session: Session) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "type": "complete",
+            "session_id": session.session_id,
+            "result": session.callback_result,
+            "sequence": session.callback_sequence or session.event_sequence,
+            "emitted_at": session.last_activity,
+        }
+        if session.callback_context:
+            payload["context"] = dict(session.callback_context)
+        return payload
+
     def _persist_outbox(self, url: str, payload: dict[str, Any]) -> str | None:
         if payload.get("type") != "complete":
             return None
@@ -634,18 +715,207 @@ class SessionManager:
         return path
 
     def _mark_delivery_success(self, payload: dict[str, Any], outbox_path: str | None) -> None:
+        if payload.get("type") == "complete":
+            with self._lock:
+                session = self._sessions.get(payload.get("session_id"))
+                if session:
+                    if session._callback_discarded:
+                        return
+                    session._callback_sent = True
+                    session._callback_pending = False
+                    session._callback_dead_letter = False
+                    session._callback_last_status = None
+                    session._callback_last_error = None
+                    session._callback_dead_lettered_at = None
+                    self._persist_session_locked(session)
         if outbox_path:
             try:
                 os.unlink(outbox_path)
             except FileNotFoundError:
                 pass
-        if payload.get("type") == "complete":
-            with self._lock:
-                session = self._sessions.get(payload.get("session_id"))
-                if session:
-                    session._callback_sent = True
-                    session._callback_pending = False
-                    self._persist_session_locked(session)
+
+    def _record_delivery_failure(
+        self,
+        payload: dict[str, Any],
+        *,
+        status: int | None,
+        error: str,
+    ) -> None:
+        if payload.get("type") != "complete":
+            return
+        with self._lock:
+            session = self._sessions.get(str(payload.get("session_id") or ""))
+            if (
+                session is None
+                or session._callback_sent
+                or session._callback_dead_letter
+                or session._callback_discarded
+            ):
+                return
+            session._callback_last_status = status
+            session._callback_last_error = str(error)[:1000]
+            self._persist_session_locked(session)
+
+    def _mark_delivery_dead_letter(
+        self,
+        payload: dict[str, Any],
+        outbox_path: str | None,
+        *,
+        status: int,
+        error: str,
+    ) -> None:
+        """Stop automatic retries while retaining a manually recoverable copy."""
+        session_id = str(payload.get("session_id") or "")
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session._callback_discarded:
+                return
+            session._callback_sent = False
+            session._callback_pending = False
+            session._callback_dead_letter = True
+            session._callback_last_status = status
+            session._callback_last_error = str(error)[:1000]
+            session._callback_dead_lettered_at = time.time()
+            self._persist_session_locked(session)
+        if outbox_path:
+            dead_path = self._dead_letter_path(payload)
+            try:
+                os.makedirs(self._dead_letter_dir, exist_ok=True)
+                os.replace(outbox_path, dead_path)
+            except FileNotFoundError:
+                self._atomic_json(dead_path, {"url": session.callback_url, "payload": payload})
+            except OSError as exc:
+                # State is authoritative and prevents retries even if moving the
+                # diagnostic envelope failed.
+                logger.error(
+                    "Could not move terminal callback to dead letter storage",
+                    extra={"session_id": session_id, "error": str(exc)},
+                )
+
+    @staticmethod
+    def _response_body(response) -> dict[str, Any]:
+        try:
+            value = response.json()
+            return value if isinstance(value, dict) else {}
+        except Exception:  # pylint: disable=broad-except
+            return {}
+
+    @staticmethod
+    def _response_error(status: int, body: dict[str, Any]) -> str:
+        for key in ("error", "report", "message", "status"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"HTTP {status}: {value.strip()[:900]}"
+        return f"HTTP {status}: callback receiver rejected the completion"
+
+    @staticmethod
+    def _callback_output_summaries(session: Session) -> list[dict[str, Any]]:
+        result = session.callback_result or {}
+        summaries: list[dict[str, Any]] = []
+        seen: set[tuple[str, int | None, str]] = set()
+        for key in ("output_files_content", "output_files_omitted"):
+            for item in result.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                name = os.path.basename(str(item.get("name") or "unnamed"))
+                raw_size = item.get("size_bytes", item.get("size"))
+                size = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else None
+                sha = str(item.get("sha256") or "")
+                identity = (name, size, sha)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                summaries.append({"name": name, "size_bytes": size})
+        return summaries
+
+    def _callback_summary(self, session: Session) -> dict[str, Any]:
+        return {
+            "session_id": session.session_id,
+            "state": "dead_letter" if session._callback_dead_letter else "pending",
+            "completion_status": session.status,
+            "callback_status": session._callback_last_status,
+            "callback_error": session._callback_last_error,
+            "dead_lettered_at": session._callback_dead_lettered_at,
+            "updated_at": session._callback_dead_lettered_at or session.last_activity,
+            "callback_sequence": session.callback_sequence,
+            "output_files": self._callback_output_summaries(session),
+        }
+
+    def list_callback_outbox(self) -> list[dict[str, Any]]:
+        """Return bounded, path-free administrative callback diagnostics."""
+        with self._lock:
+            entries = [
+                self._callback_summary(session)
+                for session in self._sessions.values()
+                if session.callback_url
+                and not session._callback_sent
+                and not session._callback_discarded
+                and (session._callback_pending or session._callback_dead_letter)
+            ]
+        entries.sort(
+            key=lambda item: (
+                item["state"] != "dead_letter",
+                -(item.get("updated_at") or 0),
+            )
+        )
+        return entries[:200]
+
+    def retry_callback(self, session_id: str) -> dict[str, Any]:
+        """Requeue one retained completion and trigger an immediate attempt."""
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise KeyError("callback session not found")
+            if not session.callback_url or session.callback_result is None:
+                raise ValueError("session has no completion callback to retry")
+            session._callback_sent = False
+            session._callback_pending = True
+            session._callback_dead_letter = False
+            session._callback_discarded = False
+            session._callback_last_status = None
+            session._callback_last_error = None
+            session._callback_dead_lettered_at = None
+            session.last_activity = time.time()
+            payload = self._completion_payload(session)
+            url = session.callback_url
+            self._persist_session_locked(session)
+            summary = self._callback_summary(session)
+        dead_path = self._dead_letter_path(payload)
+        try:
+            os.unlink(dead_path)
+        except FileNotFoundError:
+            pass
+        self._fire_webhook(url, payload)
+        return summary
+
+    def discard_callback(self, session_id: str) -> dict[str, Any]:
+        """Stop retries and remove callback envelopes without deleting outputs."""
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise KeyError("callback session not found")
+            if session._callback_sent:
+                raise ValueError("callback was already delivered")
+            session._callback_pending = False
+            session._callback_dead_letter = False
+            session._callback_discarded = True
+            session._callback_last_error = "Discarded by an authenticated operator"
+            session._callback_dead_lettered_at = None
+            session.last_activity = time.time()
+            payload = self._completion_payload(session)
+            self._persist_session_locked(session)
+            summary = {
+                **self._callback_summary(session),
+                "state": "discarded",
+            }
+        for candidate in (self._outbox_path(payload), self._dead_letter_path(payload)):
+            try:
+                os.unlink(candidate)
+            except FileNotFoundError:
+                pass
+        return summary
 
     def _advance_delivery(self, session_id: str, sequence: int) -> None:
         with self._lock:
@@ -695,6 +965,10 @@ class SessionManager:
             attempt = 0
             success = False
             while attempt < max_attempts:
+                with self._lock:
+                    delivery_session = self._sessions.get(session_id)
+                    if delivery_session and delivery_session._callback_discarded:
+                        break
                 attempt += 1
                 try:
                     kwargs: dict[str, Any] = {"json": payload_to_send, "timeout": 30}
@@ -742,11 +1016,36 @@ class SessionManager:
                         payload_to_send = {**payload_to_send, "result": stripped_result}
                         attempt = 0
                         continue
+                    body = self._response_body(response)
+                    if not 200 <= response.status_code < 300 and body.get("retryable") is False:
+                        error = self._response_error(response.status_code, body)
+                        self._mark_delivery_dead_letter(
+                            payload_to_send,
+                            outbox_path,
+                            status=response.status_code,
+                            error=error,
+                        )
+                        logger.warning(
+                            "Webhook moved to dead letter after terminal rejection",
+                            extra={
+                                "url": url,
+                                "status": response.status_code,
+                                "error": error,
+                                "session_id": session_id,
+                            },
+                        )
+                        break
                     response.raise_for_status()
                     success = True
-                    self._mark_delivery_success(payload, outbox_path)
+                    self._mark_delivery_success(payload_to_send, outbox_path)
                     break
                 except Exception as exc:  # pylint: disable=broad-except
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    self._record_delivery_failure(
+                        payload_to_send,
+                        status=status if isinstance(status, int) else None,
+                        error=str(exc),
+                    )
                     if attempt >= max_attempts:
                         logger.error(
                             "Webhook remains in durable outbox after retries",
@@ -774,20 +1073,14 @@ class SessionManager:
             time.sleep(max(1.0, _OUTBOX_RETRY_INTERVAL))
             with self._lock:
                 pending = [
-                    (
-                        session.callback_url,
-                        {
-                            "type": "complete",
-                            "session_id": session.session_id,
-                            "result": session.callback_result,
-                            "sequence": session.callback_sequence or session.event_sequence,
-                        },
-                    )
+                    (session.callback_url, self._completion_payload(session))
                     for session in self._sessions.values()
                     if session.callback_url
                     and session.callback_result is not None
                     and session._callback_pending
                     and not session._callback_sent
+                    and not session._callback_dead_letter
+                    and not session._callback_discarded
                 ]
             for url, payload in pending:
                 self._fire_webhook(url, payload)
@@ -802,8 +1095,12 @@ class SessionManager:
                     session_id = payload.get("session_id")
                     with self._lock:
                         session = self._sessions.get(session_id)
-                        if session and session._callback_sent:
+                        if session and (session._callback_sent or session._callback_discarded):
                             os.unlink(path)
+                            continue
+                        if session and session._callback_dead_letter:
+                            os.makedirs(self._dead_letter_dir, exist_ok=True)
+                            os.replace(path, self._dead_letter_path(payload))
                             continue
                     # _fire_webhook atomically rewrites the same durable path.
                     self._fire_webhook(item["url"], payload)
@@ -1003,17 +1300,19 @@ class SessionManager:
                 extra={"session_id": session_id, "error": str(exc)},
             )
             return
-        if os.path.isdir(self._outbox_dir):
-            prefix = f"{session_id}-"
-            for filename in os.listdir(self._outbox_dir):
+        prefix = f"{session_id}-"
+        for directory in (self._outbox_dir, self._dead_letter_dir):
+            if not os.path.isdir(directory):
+                continue
+            for filename in os.listdir(directory):
                 if filename.startswith(prefix) and filename.endswith(".json"):
                     try:
-                        os.unlink(os.path.join(self._outbox_dir, filename))
+                        os.unlink(os.path.join(directory, filename))
                     except FileNotFoundError:
                         pass
                     except OSError as exc:
                         logger.error(
-                            "Session cleanup retained ownership because outbox removal failed",
+                            "Session cleanup retained ownership because callback envelope removal failed",
                             extra={"session_id": session_id, "error": str(exc)},
                         )
                         return
@@ -1031,7 +1330,11 @@ class SessionManager:
                     sid for sid, session in self._sessions.items()
                     if now - session.last_activity > self.idle_timeout
                     and session.status == "completed"
-                    and (session._callback_sent or not session.callback_url)
+                    and (
+                        session._callback_sent
+                        or session._callback_discarded
+                        or not session.callback_url
+                    )
                 ]
             for session_id in to_remove:
                 self.cleanup_session(session_id)

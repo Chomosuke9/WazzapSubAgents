@@ -80,6 +80,27 @@ def _quality(value: Any) -> bool:
     raise ValueError("high_quality must be a boolean")
 
 
+def _callback_context(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - {"chat_id"}:
+        raise ValueError("callback_context may only contain chat_id")
+    if not value:
+        return {}
+    chat_id = value.get("chat_id")
+    if not isinstance(chat_id, str):
+        raise ValueError("callback_context.chat_id must be a string")
+    chat_id = chat_id.strip()
+    if (
+        not chat_id
+        or len(chat_id) > 256
+        or any(ord(char) < 32 for char in chat_id)
+        or not chat_id.endswith(("@g.us", "@s.whatsapp.net", "@lid"))
+    ):
+        raise ValueError("callback_context.chat_id is invalid")
+    return {"chat_id": chat_id}
+
+
 def _request_fingerprint(data: dict[str, Any], *, steering: bool = False) -> str:
     """Hash the semantic request without materializing another huge JSON body."""
     digest = hashlib.sha256()
@@ -87,7 +108,13 @@ def _request_fingerprint(data: dict[str, Any], *, steering: bool = False) -> str
     if steering:
         keys.append("steering_id")
     else:
-        keys.extend(["high_quality", "previous_session_id", "callback_url", "progress_webhook"])
+        keys.extend([
+            "high_quality",
+            "previous_session_id",
+            "callback_url",
+            "progress_webhook",
+            "callback_context",
+        ])
     for key in keys:
         digest.update(key.encode())
         digest.update(json.dumps(data.get(key), ensure_ascii=False, sort_keys=True).encode())
@@ -241,6 +268,11 @@ def create_app(
             high_quality = _quality(data.get("high_quality", False))
             callback_url = _optional_url(data.get("callback_url"), "callback_url")
             progress_webhook = _optional_url(data.get("progress_webhook"), "progress_webhook")
+            callback_context = _callback_context(data.get("callback_context"))
+            if callback_context and not session_id.startswith(
+                f"{callback_context['chat_id']}_"
+            ):
+                raise ValueError("callback_context.chat_id does not own session_id")
             previous_session_id = data.get("previous_session_id")
             if previous_session_id is not None:
                 previous_session_id = validate_session_id(previous_session_id)
@@ -372,7 +404,12 @@ def create_app(
             "public_manifest": public_manifest,
         }
         session_manager.set_request_manifest(session_id, stored_manifest)
-        session_manager.set_callback(session_id, callback_url, progress_webhook)
+        session_manager.set_callback(
+            session_id,
+            callback_url,
+            progress_webhook,
+            callback_context,
+        )
         upload_store.release(_upload_ids(data.get("input_files") or []), session_id)
 
         def _emit_queued(sid: str, position: int, queue_size: int) -> None:
@@ -447,6 +484,40 @@ def create_app(
             **public_manifest,
             "rehydrated_files": rehydrated_manifest["staged_files"],
         }), 202
+
+    @app.get("/callbacks/outbox")
+    def callback_outbox():
+        auth_error = _api_auth_error(require_configured=True)
+        if auth_error:
+            return auth_error
+        entries = session_manager.list_callback_outbox()
+        return jsonify({"success": True, "entries": entries, "count": len(entries)}), 200
+
+    @app.post("/callbacks/<session_id>/retry")
+    def retry_callback(session_id: str):
+        auth_error = _api_auth_error(require_configured=True)
+        if auth_error:
+            return auth_error
+        try:
+            entry = session_manager.retry_callback(session_id)
+        except KeyError as exc:
+            return jsonify({"success": False, "report": str(exc.args[0])}), 404
+        except ValueError as exc:
+            return jsonify({"success": False, "report": str(exc)}), 409
+        return jsonify({"success": True, "entry": entry}), 202
+
+    @app.post("/callbacks/<session_id>/discard")
+    def discard_callback(session_id: str):
+        auth_error = _api_auth_error(require_configured=True)
+        if auth_error:
+            return auth_error
+        try:
+            entry = session_manager.discard_callback(session_id)
+        except KeyError as exc:
+            return jsonify({"success": False, "report": str(exc.args[0])}), 404
+        except ValueError as exc:
+            return jsonify({"success": False, "report": str(exc)}), 409
+        return jsonify({"success": True, "entry": entry}), 200
 
     @app.post("/steer")
     def steer():

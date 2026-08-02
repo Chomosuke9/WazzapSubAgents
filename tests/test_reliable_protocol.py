@@ -91,6 +91,61 @@ def test_execute_returns_verified_manifest_and_is_idempotent(protocol):
     manager.cleanup_session("execute-idempotent")
 
 
+def test_execute_persists_callback_context_and_fingerprints_it(protocol):
+    client, manager, _uploads = protocol
+
+    class DeferredThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self.target = target
+
+        def start(self):
+            pass
+
+    payload = {
+        "session_id": "chat@g.us_deadbeef_123",
+        "instruction": "inspect",
+        "callback_context": {"chat_id": "chat@g.us"},
+    }
+    with patch("src.app.threading.Thread", DeferredThread):
+        accepted = client.post("/execute", json=payload)
+        conflict = client.post(
+            "/execute",
+            json={**payload, "callback_context": {}},
+        )
+
+    assert accepted.status_code == 202
+    session = manager.get_session(payload["session_id"])
+    assert session is not None
+    assert session.callback_context == {"chat_id": "chat@g.us"}
+    assert conflict.status_code == 409
+    manager.cleanup_session(payload["session_id"])
+
+
+def test_callback_outbox_admin_api_is_authenticated(protocol, monkeypatch):
+    client, manager, _uploads = protocol
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "_API_TOKEN", "admin-secret")
+    with patch.object(manager, "_fire_webhook"):
+        manager.get_or_create("admin-outbox")
+        manager.set_callback("admin-outbox", "http://callback/complete", None)
+        manager.store_result(
+            "admin-outbox",
+            {"success": True, "report": "done", "output_files": []},
+        )
+
+    assert client.get("/callbacks/outbox").status_code == 401
+    headers = {"Authorization": "Bearer admin-secret"}
+    listed = client.get("/callbacks/outbox", headers=headers)
+    assert listed.status_code == 200
+    assert listed.get_json()["entries"][0]["session_id"] == "admin-outbox"
+
+    discarded = client.post("/callbacks/admin-outbox/discard", headers=headers)
+    assert discarded.status_code == 200
+    assert discarded.get_json()["entry"]["state"] == "discarded"
+    assert client.get("/callbacks/outbox", headers=headers).get_json()["count"] == 0
+
+
 def test_strict_base64_and_integrity_mismatch_are_rejected(protocol):
     client, _manager, _uploads = protocol
     bad_base64 = client.post(
