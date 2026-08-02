@@ -9,7 +9,7 @@ Local/remote AI gateway exposing OpenAI-compatible REST. One key, many providers
 
 ## Runtime configuration
 
-`NINEROUTER_URL` and `NINEROUTER_KEY` are injected into the executor environment. Use them as opaque values; never print, echo, or write the key. Do not replace the URL with `localhost` from inside the executor container. A host-local 9Router normally uses `http://host.docker.internal:20128`; a remote 9Router must use HTTPS.
+`NINEROUTER_URL` and `NINEROUTER_KEY` are injected into the executor environment. Use them as opaque values; never print, echo, or write the key. Do not replace the URL with `localhost` from inside the executor container. 
 
 All requests: `${NINEROUTER_URL}/v1/...` with header `Authorization: Bearer ${NINEROUTER_KEY}` (omit if auth disabled).
 
@@ -28,6 +28,7 @@ curl "$NINEROUTER_URL/v1/models/image-to-text" -H "Authorization: Bearer $NINERO
 ```
 
 Use `data[].id` as `model` field in requests. Combos appear with `owned_by:"combo"`.
+To prevent error, we recommend to use "combo" models when available, as they are more reliable than individual models.
 
 Response shape:
 ```json
