@@ -15,8 +15,7 @@ This directory contains specialized instructions for document, media, research, 
 | [xlsx](./xlsx) | Instructions for spreadsheet manipulation, data analysis, and styled Excel (.xlsx) creation using `pandas` and `openpyxl`. |
 | [media-downloader](./media-downloader) | Download videos from YouTube, TikTok, Instagram, Twitter/X, and 1000+ sites using `yt-dlp`. Download Spotify tracks, playlists, and albums with metadata using `spotdl`. |
 | [image-analyzer](./image-analyzer) | Analyze image files — extract metadata (EXIF), detect dimensions/format/colors, perform OCR text extraction, compare images, and generate structured reports. Uses Pillow, pytesseract, and opencv (sparingly). |
-| [internet-researcher](./internet-researcher) | Internet research using Brave Search API — web search, image search, news search, video search, and LLM-optimized content extraction. |
-| [9router](./9router) | 9Router AI gateway for chat, image/video generation, TTS, STT, embeddings, web search, and web fetch. |
+| [9router](./9router) | 9Router AI gateway for chat, image/video generation, TTS, STT,image to text, embeddings, web search, and web fetch. |
 
 The 9Router skill suite was vendored from [`decolua/9router`](https://github.com/decolua/9router) commit `79918c7830695bbca4a45c9fea4a42c3e9fd73d1` under its MIT license and adapted for this executor's local paths, dependencies, and secret handling.
 
