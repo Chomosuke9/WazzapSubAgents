@@ -579,8 +579,8 @@ class ExecutorAgent:
 
         return accepted
 
-    def _build_system_prompt(self, workdir: str) -> str:
-        return build_executor_system_prompt(workdir)
+    def _build_system_prompt(self, workdir: str, input_files: List[str]) -> str:
+        return build_executor_system_prompt(workdir, input_files)
 
     # ------------------------------------------------------------------
     # Tool-call extraction
@@ -923,7 +923,7 @@ class ExecutorAgent:
         ]
 
         messages: List[Any] = [
-            SystemMessage(content=self._build_system_prompt(sandbox_workdir)),
+            SystemMessage(content=self._build_system_prompt(sandbox_workdir, sandbox_input_files)),
         ]
 
         # If this is a correction re-dispatch, carry forward the previous

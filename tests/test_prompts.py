@@ -1,14 +1,15 @@
-from src.prompts import build_executor_system_prompt, load_skill_catalog
+from src.prompts import build_executor_system_prompt
 
 
-def test_system_prompt_injects_catalog_and_skips_redundant_readme_call():
-    prompt = build_executor_system_prompt("/tmp/session")
+def test_system_prompt_injects_input_files_and_skips_redundant_readme_call():
+    prompt = build_executor_system_prompt("/tmp/session", ["/input/a.pdf", "/input/b.txt"])
 
-    assert "9router:" in prompt
-    assert "/skills/9router/SKILL.md" in prompt
-    assert "create-method:" in prompt
-    assert "read `/skills/create-method/SKILL.md`" in prompt
-    assert "do not spend a tool call rereading `/skills/README.md`" in prompt
+    assert "not spend a tool call rereading `/skills/README.md`" not in prompt
+    assert "9router:" not in prompt
+    assert "- Catalog unavailable;" not in prompt
+    assert "Input files (read them from these exact paths):" in prompt
+    assert "- /input/a.pdf" in prompt
+    assert "- /input/b.txt" in prompt
     assert "Your FIRST tool call for every task must inspect" in prompt
     assert "After a task succeeds through the skills/fallback route" in prompt
     assert "Do not write a method for a failed or partially completed task" in prompt
@@ -24,22 +25,12 @@ def test_system_prompt_injects_catalog_and_skips_redundant_readme_call():
     assert "If no trustworthy compatible prebuilt artifact is available" in prompt
     assert "never use `apt`, `apk`, or another OS package manager" in prompt
     assert prompt.index("Reusable methods") < prompt.index("Technical documentation fallback")
+    assert "Input files (read them from these exact paths):" in prompt
     assert "Workdir: /tmp/session" in prompt
 
 
-def test_skill_catalog_reflects_bind_mount_changes_without_restart(tmp_path, monkeypatch):
-    readme = tmp_path / "README.md"
-    monkeypatch.setenv("SKILLS_DIR", str(tmp_path))
-    readme.write_text(
-        "| Folder | Description |\n|---|---|\n| [first](./first) | First skill. |\n",
-        encoding="utf-8",
-    )
-    assert "first: First skill." in load_skill_catalog()
+def test_system_prompt_handles_empty_input_files():
+    prompt = build_executor_system_prompt("/tmp/session", [])
 
-    readme.write_text(
-        "| Folder | Description |\n|---|---|\n| [second](./second) | Second skill. |\n",
-        encoding="utf-8",
-    )
-    catalog = load_skill_catalog()
-    assert "second: Second skill." in catalog
-    assert "first: First skill." not in catalog
+    assert "- (none)" in prompt
+    assert "/tmp/session" in prompt
