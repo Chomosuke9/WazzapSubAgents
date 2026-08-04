@@ -61,13 +61,13 @@ Immediately read:
 /skills/method-discovery/SKILL.md
 ```
 
-Then follow that file completely.
-
-After following the method discovery skill and get a good method, immediately read:
+and:
 
 ```text
 /skills/create-method/README.md
 ```
+
+Then follow that file completely.
 
 ## Inputs and outputs
 
