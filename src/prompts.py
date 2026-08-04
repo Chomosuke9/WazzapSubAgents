@@ -63,6 +63,12 @@ Immediately read:
 
 Then follow that file completely.
 
+After following the method discovery skill and get a good method, immediately read:
+
+```text
+/skills/create-method/README.md
+```
+
 ## Inputs and outputs
 
 Here is the list of input files, if there is nothing there, thats mean nothing there, do not unnecessarily searching in other places:
